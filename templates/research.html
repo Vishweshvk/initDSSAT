@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Research readiness · Crop DSSAT Console{% endblock %}
+{% block content %}
+<section class="pagehead"><span class="eyebrow">Scope and data readiness</span><h1>Research direction</h1><p class="muted">A transparent record of agreed product direction, candidate data, and unresolved data-quality questions.</p></section>
+<section class="card"><h2>Project direction</h2><div class="tablewrap"><table><thead><tr><th>Status</th><th>Decision or plan</th></tr></thead><tbody>
+<tr><td><span class="pill">Confirmed</span></td><td>Build a wheat yield forecasting research system for detailed user-provided field inputs, with DSSAT and ML evaluated against DSSAT alone and ML alone.</td></tr>
+<tr><td><span class="pill">Confirmed</span></td><td>First prediction at sowing; output yield per hectare and estimated total plot harvest.</td></tr>
+<tr><td><span class="pill plan">Planned</span></td><td>Potential forecast updates around day 30 and day 60, only if matching time-stamped data supports them.</td></tr>
+<tr><td><span class="pill pending">Pending</span></td><td>Choose target region after verifying suitable data coverage and resolving the data-quality audit.</td></tr>
+<tr><td><span class="pill plan">Planned</span></td><td>Working demonstration target: 30 November 2026. Publication preparation follows.</td></tr>
+<tr><td><span class="pill plan">Research target — unachieved</span></td><td>At least 90% of independent field predictions within ±10% of measured yield. This is a future acceptance target, not current performance.</td></tr>
+<tr><td><span class="pill plan">Future work</span></td><td>Validated uncertainty estimates. No confidence percentage or uncertainty interval is currently claimed.</td></tr>
+</tbody></table></div>
+<p class="warn" style="margin-top:14px">The current interface runs installed experiment treatments with historical full-season weather. It is not yet the sowing-time or day-30/day-60 product described above.</p></section>
+
+<section class="card"><h2>Candidate datasets — not integrated into training</h2><p>Counts and descriptions below are supplied in the project’s current research brief. Verify the original files, variable definitions, access conditions, and provenance before using these values as project data. Candidate record counts must not be added until overlap is resolved.</p>
+<div class="grid">
+<div class="stat"><span class="pill pending">Candidate A</span><strong>5,689 × 49</strong><span class="label">CIMMYT eastern India dataset · six seasons · ten districts (reported summary)</span></div>
+<div class="stat"><span class="pill pending">Candidate B</span><strong>3,735 × 61</strong><span class="label">Earlier sowing-date trial dataset · five seasons (reported summary)</span></div>
+</div>
+<p class="muted">Neither candidate dataset has been incorporated into the current 28-row installed-example DSSAT benchmark or model artifacts. No sowing-time forecast is produced from them.</p></section>
+
+<section class="card"><h2>Open data-audit issues</h2><ul>
+<li>Likely record overlap between candidates; counts are not additive.</li>
+<li>Coordinate inconsistencies among candidate matching records.</li>
+<li>Conflicting units for seed and fertilizer quantities.</li>
+<li>A small number of date discrepancies need source-level review.</li>
+<li>Measured soil profiles are missing.</li>
+<li>Irrigation amounts and urea application dates are missing.</li>
+<li>The supplied tables do not include a complete daily weather series.</li>
+<li>No repeated early-season crop-observation time series is available for validating day-30/day-60 updates.</li>
+</ul><p>These gaps affect what can be represented by DSSAT, what is known at each forecast date, and how independent validation must be designed. Resolve them before claiming field-level forecast accuracy.</p></section>
+{% endblock %}

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Evaluation · Crop DSSAT Console{% endblock %}
+{% block content %}
+<section class="pagehead"><span class="eyebrow">Out-of-fold performance</span><h1>Benchmark dashboard</h1><p class="muted">Each experiment is held out once. Every shown prediction comes from a model trained without that experiment.</p></section>
+<div class="warn"><strong>Retrospective benchmark only.</strong> Weather features summarize the completed crop season. These results are not evidence of sowing-time or in-season forecast performance, and the three installed experiment groups are too few to support broad farm accuracy claims.</div>
+{% if metrics and charts %}
+<section class="grid3">
+  <div class="stat"><span class="label">Out-of-fold records</span><strong>{{ metrics.n_records }}</strong></div>
+  <div class="stat"><span class="label">Held-out experiment groups</span><strong>{{ metrics.n_experiments }}</strong></div>
+  <div class="stat"><span class="label">Validation design</span><strong style="font-size:17px">Leave-one-experiment-out</strong></div>
+</section>
+<section class="two-col"><div class="card">{{ charts.mae }}</div><div class="card">{{ charts.scatter }}</div></section>
+<section class="card">{{ charts.errors }}</section>
+<section class="card"><h2>Pooled out-of-fold results</h2><p>Metrics are calculated once over all out-of-fold predictions, so larger held-out groups contribute their actual number of records. Signed error is prediction minus observation. The ±10% denominator includes only positive observed yields.</p>
+<div class="tablewrap"><table><thead><tr><th>Method</th><th>n</th><th>MAE kg/ha</th><th>RMSE kg/ha</th><th>Mean signed error kg/ha</th><th>R²</th><th>Within ±10%</th><th>Nonpositive excluded</th></tr></thead><tbody>
+{% for key,label in [("dssat_only","DSSAT alone"),("ml_only","ML-only Random Forest"),("hybrid","DSSAT + residual Random Forest")] %}{% set row=metrics.pooled_oof[key] %}<tr><td>{{ label }}</td><td>{{ row.n }}</td><td>{{ "%.1f"|format(row.mae_kg_ha) }}</td><td>{{ "%.1f"|format(row.rmse_kg_ha) }}</td><td>{{ "%+.1f"|format(row.mean_signed_error_kg_ha) }}</td><td>{% if row.r2 is not none %}{{ "%.3f"|format(row.r2) }}{% else %}undefined{% endif %}</td><td>{% if row.within_10_percent_pct is not none %}{{ "%.1f"|format(row.within_10_percent_pct) }}% ({{ row.within_10_percent_denominator }} positive targets){% else %}undefined{% endif %}</td><td>{{ row.excluded_nonpositive_observed_count }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% if metrics.pooled_hybrid_beats_dssat_on_mae %}<p class="warn">On this pooled retrospective holdout, hybrid MAE is lower than DSSAT MAE. This result is not validated for another region or forecast date.</p>{% else %}<p class="error">On this pooled retrospective holdout, the hybrid does not beat DSSAT on MAE. Keep that result visible; do not select the hybrid as the better method based on these data.</p>{% endif %}
+</section>
+<section class="card"><h2>Leave-one-experiment-out folds</h2><p>Training count is the rows in the other experiment groups; test count is the held-out group. One-sample folds have undefined R².</p><div class="tablewrap"><table><thead><tr><th>Held-out experiment</th><th>Train n</th><th>Test n</th><th>Method</th><th>MAE kg/ha</th><th>RMSE kg/ha</th><th>Bias kg/ha</th><th>R²</th><th>Within ±10%</th></tr></thead><tbody>
+{% for fold in metrics.folds %}{% for key,label in [("dssat_only","DSSAT"),("ml_only","ML-only"),("hybrid","Hybrid")] %}{% set row=fold.metrics[key] %}<tr><td>{{ fold.held_out_experiment }}</td><td>{{ fold.n_train }}</td><td>{{ fold.n_test }}</td><td>{{ label }}</td><td>{{ "%.1f"|format(row.mae_kg_ha) }}</td><td>{{ "%.1f"|format(row.rmse_kg_ha) }}</td><td>{{ "%+.1f"|format(row.mean_signed_error_kg_ha) }}</td><td>{% if row.r2 is not none %}{{ "%.3f"|format(row.r2) }}{% else %}undefined{% endif %}</td><td>{% if row.within_10_percent_pct is not none %}{{ "%.1f"|format(row.within_10_percent_pct) }}%{% else %}undefined{% endif %}</td></tr>{% endfor %}{% endfor %}
+</tbody></table></div></section>
+<section class="card"><h2>Method and reproducibility</h2><p>Evaluation is recomputed each time with <code>python -m cli.main evaluate --crop wheat</code>. The saved final all-data model does not generate these benchmark predictions. Preprocessors are fit only on each fold’s training experiments. The separate <code>train-residual</code> command fits the deployable residual model on all dataset rows.</p>
+{% if metadata %}<details><summary>Feature lists, seeds, dataset hash, and package versions</summary><pre>{{ metadata | tojson(indent=2) }}</pre></details>{% endif %}
+</section>
+{% else %}<section class="card"><h2>No benchmark artifacts found</h2><p>Run evaluation after creating or confirming the matched simulation/observation dataset. This evaluates the current processed CSV and writes out-of-fold predictions, metrics, and reproducibility metadata.</p><pre>python -m cli.main evaluate --crop wheat</pre></section>{% endif %}
+{% endblock %}

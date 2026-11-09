@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Input or run error · Crop DSSAT Console{% endblock %}
+{% block content %}
+<section class="pagehead"><span class="eyebrow">Input check</span><h1>Could not complete the request</h1></section>
+<div class="card error"><strong>What happened</strong><p>{{ message }}</p><p>Correct the input or DSSAT setup, then try again. A failed model correction is never presented as a valid hybrid yield.</p></div>
+<p><a class="button" href="/">Return to prediction</a> <a class="button" href="/evaluation">View evaluation</a></p>
+{% endblock %}

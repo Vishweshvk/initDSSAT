@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Prediction · Crop DSSAT Console{% endblock %}
+{% block content %}
+<section class="pagehead"><span class="eyebrow">DSSAT crop simulation</span><h1>Describe your field</h1><p class="muted">Enter your location and crop conditions before running a simulation. Each field has a short explanation to help you choose.</p></section>
+{% if error %}<div class="card error"><strong>DSSAT setup needs attention.</strong><br>{{ error }}</div>{% endif %}
+<section class="card">
+{% if experiments %}
+<form action="/predict" method="post">
+  <div class="grid">
+    <div><label for="state">State / Union Territory</label><select id="state" name="state" required><option value="">Choose your state</option>{% for state in states %}<option value="{{ state }}">{{ state }}</option>{% endfor %}</select><span class="tagline">Choose the state that contains your field.</span></div>
+    <div><label for="city">City or town</label><input id="city" name="city" type="search" list="place-options" autocomplete="off" maxlength="120" placeholder="Type at least two letters" required disabled><datalist id="place-options"></datalist><input id="geoname_id" name="geoname_id" type="hidden"><span id="place-help" class="tagline">Choose a place suggestion to attach its coordinates. Source: GeoNames (CC BY 4.0).</span></div>
+    <div><label for="crop">Crop</label><select id="crop" name="crop" required>{% for crop in crops %}<option value="{{ crop }}">{{ crop }}</option>{% endfor %}</select><span class="tagline">Select any crop supported by the DSSAT data installed on this computer.</span></div>
+    <div><label for="season">Season</label><select id="season" name="season" required><option value="">Choose a season</option>{% for season in seasons %}<option value="{{ season }}">{{ season }}</option>{% endfor %}</select><span class="tagline">Season records the growing season you have in mind; the DSSAT source experiment supplies its weather calendar.</span></div>
+    <div><label for="planting_date">Planting date</label><input id="planting_date" name="planting_date" type="date" required><span class="tagline">The date you plan to sow or transplant the crop.</span></div>
+    <div><label for="soil_type">Soil type</label><select id="soil_type" name="soil_type" required><option value="">Choose a soil type</option>{% for soil in soil_types %}<option value="{{ soil }}">{{ soil }}</option>{% endfor %}</select><span class="tagline">Choose the closest known soil texture; local measured soil data gives a better match.</span></div>
+    <div><label for="irrigation">Irrigation</label><select id="irrigation" name="irrigation" required><option value="rainfed">Rainfed</option><option value="irrigated">Irrigated</option></select><span class="tagline">Tell us whether the field receives irrigation during this crop season.</span></div>
+    <div class="irrigation-detail"><label for="irrigation_interval_days">Irrigation schedule</label><div class="grid"><input id="irrigation_interval_days" name="irrigation_interval_days" type="number" min="1" max="60" value="7" aria-label="Irrigation interval in days"><input id="irrigation_amount_mm" name="irrigation_amount_mm" type="number" min="1" max="300" step="any" value="50" aria-label="Irrigation amount in millimeters"></div><span class="tagline">For an irrigated field, enter the interval in days and water amount in millimeters per event.</span></div>
+    <div><label for="nitrogen_rate">Fertilizer nitrogen</label><input id="nitrogen_rate" name="nitrogen_rate" type="number" min="0" max="1000" step="any" value="0" required><span class="tagline">Total nitrogen applied, in kilograms of N per hectare.</span></div>
+    <div><label for="nitrogen_timing">Nitrogen timing</label><select id="nitrogen_timing" name="nitrogen_timing"><option value="planting">At planting</option><option value="split">Split application</option></select><span class="tagline">Choose whether to apply the nitrogen at planting or in split applications.</span></div>
+    <div><label for="plant_density">Plant density</label><input id="plant_density" name="plant_density" type="number" min="1" max="2000000" step="any" required placeholder="e.g. 250000"><span class="tagline">Enter the target number of plants per hectare (or seeds per hectare if that is what you know).</span></div>
+  </div>
+  <input type="hidden" name="experiment" id="experiment" value="{{ experiments[0].experiment_id }}">
+  <div class="warn" style="margin-top:18px">The app requests NASA POWER daily weather for the selected coordinates and planting date when a complete, valid 365-day record is available; otherwise it uses the installed DSSAT weather file and explains the fallback. NASA POWER is gridded regional data, not a field weather station. Coordinates are matched against installed DSSAT experiments only when one is within 100 km. The GeoNames point represents the settlement, not your exact field. Soil type remains a context value until a local soil profile is connected.</div>
+  <p><button type="submit">Run DSSAT simulation</button></p>
+</form>
+{% else %}<p class="muted">Set <code>DSSAT_HOME</code> or <code>DSSAT_EXECUTABLE</code> in the project <code>.env</code> file or environment, then run <code>python -m cli.main doctor</code>.</p>{% endif %}
+</section>
+<script>
+const crops={{ crops|tojson }}, experiments={{ experiments|map(attribute='experiment_id')|list|tojson }}, expCrops={{ experiments|map(attribute='crop')|list|tojson }};
+const cropSelect=document.getElementById('crop'), experimentInput=document.getElementById('experiment');
+function chooseExperiment(){if(!cropSelect||!experimentInput)return;const i=expCrops.findIndex(c=>c===cropSelect.value);if(i>=0)experimentInput.value=experiments[i];}
+cropSelect?.addEventListener('change',chooseExperiment);chooseExperiment();
+const irrigation=document.getElementById('irrigation');function toggleIrrigation(){document.querySelector('.irrigation-detail').hidden=irrigation.value!=='irrigated';}
+irrigation?.addEventListener('change',toggleIrrigation);toggleIrrigation();
+const stateSelect=document.getElementById('state'), cityInput=document.getElementById('city'), placeOptions=document.getElementById('place-options'), placeId=document.getElementById('geoname_id'), placeHelp=document.getElementById('place-help');let placeMatches=[];let placeTimer;
+function clearPlace(){placeId.value='';placeMatches=[];placeOptions.replaceChildren();}
+stateSelect?.addEventListener('change',()=>{clearPlace();cityInput.value='';cityInput.disabled=!stateSelect.value;});
+cityInput?.addEventListener('input',()=>{clearPlace();clearTimeout(placeTimer);if(cityInput.value.trim().length<2||!stateSelect.value)return;placeTimer=setTimeout(async()=>{try{const params=new URLSearchParams({state:stateSelect.value,q:cityInput.value.trim()});const response=await fetch(`/api/places?${params}`);if(!response.ok)throw new Error('Place lookup unavailable.');placeMatches=await response.json();placeOptions.replaceChildren(...placeMatches.map(item=>{const option=document.createElement('option');option.value=item.label;return option;}));placeHelp.textContent=placeMatches.length?'Select a listed place; its GeoNames coordinates will be saved with the run.':'No place matched. Try another spelling.';}catch(error){placeHelp.textContent=error.message;}},180);});
+cityInput?.addEventListener('change',()=>{const selected=placeMatches.find(item=>item.label===cityInput.value);if(!selected){clearPlace();placeHelp.textContent='Choose a city or town from the suggestions.';return;}placeId.value=selected.geoname_id;placeHelp.textContent=`Coordinates: ${Number(selected.latitude).toFixed(4)}, ${Number(selected.longitude).toFixed(4)} · GeoNames settlement point.`;});
+document.querySelector('form')?.addEventListener('submit',event=>{if(!placeId.value){event.preventDefault();placeHelp.textContent='Choose a place from the suggestions before running.';cityInput.focus();}});
+</script>
+{% endblock %}

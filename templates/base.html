@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Crop Yield Research Console{% endblock %}</title>
+  <style>
+    :root{--forest:#173a2b;--forest2:#244d38;--cream:#f6f5ee;--paper:#fff;--ink:#1b2b21;--muted:#5d6b61;--line:#dce3da;--gold:#d8a83e;--red:#9e4439;--green:#2e704b;--shadow:0 16px 44px #173a2b12}
+    *{box-sizing:border-box}body{margin:0;background:var(--cream);color:var(--ink);font:15px/1.55 "Segoe UI",system-ui,sans-serif}
+    header{background:var(--forest);color:#fff} .top{max-width:1120px;margin:auto;padding:15px 24px;display:flex;align-items:center;justify-content:space-between;gap:22px;flex-wrap:wrap}
+    .brand{font-weight:700;letter-spacing:.02em}.brand small{display:block;font-size:11px;color:#c8d6c9;font-weight:400;letter-spacing:.12em;text-transform:uppercase}
+    nav{display:flex;gap:8px;flex-wrap:wrap}nav a{padding:8px 12px;border-radius:8px;color:#e5eee6;text-decoration:none;font-size:14px}nav a:hover,nav a:focus{background:#ffffff1b;color:#fff}
+    main{max-width:1120px;margin:34px auto;padding:0 24px 60px}.pagehead{margin:0 0 22px}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:.13em;color:var(--green);font-weight:700}h1{font-size:clamp(28px,4vw,38px);line-height:1.12;margin:7px 0;color:var(--forest)}h2{font-size:20px;color:var(--forest);margin:0 0 12px}h3{font-size:16px;color:var(--forest);margin:0 0 10px}p{margin:8px 0 14px}.muted{color:var(--muted)}
+    .card{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:24px;box-shadow:var(--shadow);margin:16px 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.stat{padding:17px;border:1px solid var(--line);border-radius:12px;background:#fcfcf8}.stat .label{color:var(--muted);font-size:12px}.stat strong{display:block;font-size:23px;color:var(--forest);margin-top:5px}.pill{display:inline-block;padding:4px 9px;border-radius:999px;background:#e9f1e8;color:#295b3a;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}.pill.pending{background:#fff2d5;color:#805d10}.pill.plan{background:#e8edf2;color:#4a6175}.warn{border-left:4px solid var(--gold);background:#fff9e9;padding:13px 16px;border-radius:0 10px 10px 0;color:#574a2b}.error{border-left:4px solid var(--red);background:#fff1ee;padding:13px 16px;border-radius:0 10px 10px 0;color:#722f28}
+    form label{display:block;margin:14px 0 5px;font-weight:600;color:#31463a}input,select{font:inherit;width:100%;padding:11px 12px;border:1px solid #bdcbbf;border-radius:9px;background:#fff;color:var(--ink)}input:focus,select:focus{outline:3px solid #d8a83e44;border-color:var(--gold)}button,.button{display:inline-block;border:0;border-radius:9px;padding:12px 17px;background:var(--forest);color:#fff;text-decoration:none;font:inherit;font-weight:650;cursor:pointer}button:hover,.button:hover{background:var(--forest2)}
+    table{width:100%;border-collapse:collapse;margin-top:10px;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:10px 11px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#546459;background:#f5f7f3}tr:last-child td{border-bottom:0}.tablewrap{overflow:auto;border:1px solid var(--line);border-radius:11px}
+    dl{display:grid;grid-template-columns:minmax(145px,220px) 1fr;gap:7px 16px;margin:8px 0}dt{font-weight:650;color:#415449}dd{margin:0;overflow-wrap:anywhere}code,pre{background:#f0f2ed;border-radius:5px;padding:2px 5px;color:#294634}pre{padding:13px;overflow:auto}.chart{width:100%;height:auto;display:block}.two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}.tagline{color:var(--muted);font-size:13px}details{margin:12px 0}summary{cursor:pointer;color:var(--forest);font-weight:650}ul{padding-left:22px}li{margin:6px 0}footer{max-width:1120px;margin:0 auto;padding:0 24px 28px;color:var(--muted);font-size:12px}
+    @media(max-width:720px){main{margin-top:22px;padding:0 14px 42px}.top{padding:12px 15px}.grid,.grid3,.two-col{grid-template-columns:1fr}.card{padding:18px}dl{grid-template-columns:1fr;gap:2px}dd{margin-bottom:9px}}
+  </style>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<header><div class="top"><div class="brand">Crop Yield Research Console<small>DSSAT simulation and residual learning</small></div>
+  <nav aria-label="Main navigation"><a href="/">Prediction</a><a href="/evaluation">Evaluation</a><a href="/research">Research readiness</a></nav>
+</div></header>
+<main>{% block content %}{% endblock %}</main>
+<footer>Research demonstration · Historic simulation results are not validated farm forecasts.</footer>
+</body></html>

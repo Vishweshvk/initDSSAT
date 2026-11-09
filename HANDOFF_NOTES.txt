@@ -1,0 +1,16 @@
+Wheat DSSAT–ML project handoff
+
+This package includes the updated source, docs, tests, compact processed dataset, manifests, final model files, benchmark predictions/metrics/metadata, and the project brief/roadmap under HANDOFF/.
+
+Not included: the Python virtual environment, `.env` secrets/local paths, Python/test caches, `data/runs/` generated DSSAT run archives, model backups, or the installed DSSAT program/data library. See README.md and docs/dssat_setup.md for Windows setup. The demo walkthrough is `demo.ps1`.
+
+Quick setup in PowerShell from the extracted project directory:
+  python -m venv .venv
+  .venv\Scripts\Activate.ps1
+  python -m pip install -r requirements.txt
+  Copy-Item .env.example .env
+  # Edit .env if DSSAT is not at C:\DSSAT48
+  python -m cli.main doctor
+  .\demo.ps1
+
+Current evidence is limited to 28 records and three DSSAT wheat experiment groups. Leave-one-experiment-out pooled MAE is 516.11 kg/ha for DSSAT-only and 559.08 kg/ha for the hybrid; hybrid does not beat the baseline. Historical full-season weather makes this retrospective analysis, not a sowing-time forecast. See FINAL_CHECK.md and data/evaluation/ for results and limitations.
