@@ -12,20 +12,23 @@ import sys
 
 import pandas as pd
 
-from src.dssat.config import DssatConfig
+from src.dssat.config import DssatConfig, project_directories
 from src.dssat.data.linking import build_manifest
 from src.dssat.data.observations import (calculate_residual, read_dssat_a_file,
                                          read_observed_yield_values,
                                          observed_yield_target,
-                                         read_wheat_yield_observations)
+                                         simulation_yield_target)
 from src.dssat.data.repository import (discover_experiments, get_experiment,
                                        validate_observed_dataset, validate_simulation)
 from src.dssat.exceptions import DssatError
 from src.dssat.runner import run_experiment
 from src.dssat.parser import parse_summary
 from src.evaluation import evaluate_dataset
+from src.external_outcomes import (DES_APY_URL, normalize_des_apy)
 from src.modeling import RANDOM_SEED, RESIDUAL_FEATURES, make_regressor, validate_training_frame
-from src.prediction import area_estimate, build_experiment_features, predict_residual
+from src.prediction import (HybridNotSupported, area_estimate,
+                            build_experiment_features, predict_residual)
+from src.validation_regions import dssat_location_region
 
 
 def _config_or_report() -> DssatConfig:
@@ -545,21 +548,26 @@ def command_run(args) -> int:
     result = run_experiment(config, experiment, args.treatment)
     row = result["summary"].iloc[0]
     simulated = float(row["HWAM"])
+    yield_target = simulation_yield_target(experiment.crop_code)
     observed_value = None
     if experiment.observed_file:
         try:
-            observations = read_wheat_yield_observations(experiment.observed_file)
-            matching = observations.loc[observations.treatment_id == args.treatment, "observed_yield_kg_ha"]
+            target = observed_yield_target(experiment.crop_code)
+            if target is None:
+                raise ValueError("No reviewed measured-yield mapping for this crop.")
+            observations = read_observed_yield_values(experiment.observed_file, target["column"], target["unit"])
+            matching = observations.loc[observations.treatment_id == args.treatment, "observed_value"]
             if len(matching):
                 observed_value = float(matching.iloc[0])
         except (ValueError, OSError):
             observed_value = None
     print(f"Experiment: {experiment.experiment_id}\nCrop: {experiment.crop}\nModel: DSSAT-CSM / {experiment.dssat_module}\nWeather: {experiment.weather_file.name}\nSoil: {experiment.soil_id}\nCultivar: {experiment.cultivar_name}\nTreatment: {args.treatment}\nStatus: SUCCESS")
-    print(f"DSSAT HWAM: {simulated:.2f} kg/ha")
+    print(f"DSSAT {yield_target['column']} ({yield_target['unit']}): {simulated:.2f}")
+    print(f"Harvest definition: {yield_target['definition']} (verified: {'yes' if yield_target['verified'] else 'no'})")
     if observed_value is None:
-        print("Observed HWAM: unavailable for this treatment (the simulation is still valid).")
+        print("Observed harvested yield: unavailable for this treatment (the simulation is still valid).")
     else:
-        print(f"Observed HWAM: {observed_value:.2f} kg/ha; residual observed - simulated: {calculate_residual(observed_value, simulated):+.2f} kg/ha")
+        print(f"Observed {yield_target['column']}: {observed_value:.2f} {yield_target['unit']}; residual observed - simulated: {calculate_residual(observed_value, simulated):+.2f} kg/ha")
     if result["growth"] is not None:
         print(f"PlantGro daily rows: {len(result['growth'])}")
     print(f"Run ID: {result['run_id']}\nRun archive: {result['run_dir']}")
@@ -586,7 +594,10 @@ def command_build_dataset(args) -> int:
             rejected.append({"experiment_id": item["experiment_id"], "status": "rejected",
                              "reason": item["dataset_validation_error"]})
             continue
-        experiment = get_experiment(config.data_dir, item["experiment_id"], profile_path=config.home / "DSSATPRO.v48")
+        # Experiment IDs are not globally unique across DSSAT crop folders (e.g. UFGA8401).
+        # Resolve each manifest entry within its crop to avoid pairing another crop's files.
+        experiment = get_experiment(config.data_dir, item["experiment_id"], crop=item["crop"],
+                                    profile_path=config.home / "DSSATPRO.v48")
         target = observed_yield_target(experiment.crop_code)
         if target is None:
             rejected.append({"experiment_id": experiment.experiment_id, "status": "rejected_unmapped_crop_yield",
@@ -647,6 +658,7 @@ def command_build_dataset(args) -> int:
                 planting_date = (datetime.strptime(f"{planting_year:04d}{planting_day:03d}", "%Y%j").date().isoformat())
                 observed_yield = float(observed_row["observed_value"])
                 dssat_yield = float(simulation["HWAM"])
+                simulation_target = simulation_yield_target(experiment.crop_code)
                 if not (pd.notna(observed_yield) and observed_yield > 0 and pd.notna(dssat_yield) and dssat_yield > 0):
                     raise ValueError("Measured and DSSAT yields must both be finite positive harvested yields.")
                 summary_file = result["run_dir"] / "output" / "Summary.OUT"
@@ -682,6 +694,10 @@ def command_build_dataset(args) -> int:
                              "observed_treatment_id": treatment,
                              "simulation_filex": experiment.experiment_file.name,
                              "simulation_yield_variable": target["column"],
+                             "simulation_yield_definition": simulation_target["definition"],
+                             "simulation_yield_unit": simulation_target["unit"],
+                             "simulation_yield_basis": simulation_target["basis"],
+                             "yield_definition_verified": simulation_target["verified"],
                              "dssat_run_id": result["run_id"],
                              "dssat_summary_file": relative_summary,
                              "dssat_treatment_id": treatment,
@@ -829,6 +845,34 @@ def command_show_evaluation(_args) -> int:
     return 0
 
 
+def command_import_des_apy(args) -> int:
+    """Import an official aggregate APY report for context-only comparison."""
+    _, project_data_dir, _ = project_directories()
+    source = Path(args.source).expanduser().resolve()
+    output = (Path(args.output).expanduser().resolve() if args.output else
+              project_data_dir / "external" / "des_apy" / "processed" /
+              f"{re.sub(r'[^A-Za-z0-9_-]+', '_', source.stem).strip('_')}_normalized.csv")
+    normalized, rejected, manifest = normalize_des_apy(
+        source, yield_unit=args.yield_unit, source_url=args.source_url,
+        retrieved_at_utc=args.retrieved_at_utc, area_unit=args.area_unit,
+        production_unit=args.production_unit,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    normalized.to_csv(output, index=False)
+    stem = output.name.removesuffix("_normalized.csv")
+    manifest_path = output.with_name(f"{stem}_manifest.json")
+    rejected_path = output.with_name(f"{stem}_rejected.csv")
+    manifest["canonical_file"] = output.name
+    manifest["rejected_file"] = rejected_path.name if not rejected.empty else None
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if not rejected.empty:
+        rejected.to_csv(rejected_path, index=False)
+    print(f"Imported {len(normalized)} aggregate rows to {output}")
+    print(f"Rejected rows: {len(rejected)}; manifest: {manifest_path}")
+    print("These DES records are context-only and are explicitly excluded from residual-model training.")
+    return 0
+
+
 def command_predict(args) -> int:
     config = _config_or_report()
     experiment = get_experiment(config.data_dir, args.experiment, profile_path=config.home / "DSSATPRO.v48")
@@ -836,10 +880,16 @@ def command_predict(args) -> int:
     result = run_experiment(config, experiment, args.treatment)
     summary = result["summary"].iloc[0]
     dssat_yield = float(summary["HWAM"])
+    yield_target = simulation_yield_target(experiment.crop_code)
+    if not yield_target["verified"]:
+        print(f"DSSAT output: HWAM {dssat_yield:.2f} kg/ha — {yield_target['definition']}")
+        print("Area-scaled harvest and hybrid yield are withheld until this crop's harvested-product definition is reviewed.")
+        print(f"Run ID: {result['run_id']}\nRun archive: {result['run_dir']}")
+        return 0
     area = area_estimate(dssat_yield, args.area, args.area_unit)
     print(f"Experiment: {experiment.experiment_id}\nCrop: {experiment.crop}\nTreatment: {args.treatment}\nCultivar: {experiment.cultivar_name}")
     print("Prediction basis: historical full-season weather; retrospective simulation, not a sowing-time forecast.")
-    print(f"DSSAT yield: {dssat_yield:.2f} kg/ha")
+    print(f"DSSAT {yield_target['definition']}: {dssat_yield:.2f} {yield_target['unit']}")
     print(f"Selected experimental area: {area['area_input']:g} {area['area_unit']} ({area['area_hectares']:.6g} ha)")
     print(f"Estimated total harvest under the selected experimental conditions (DSSAT): {area['total_harvest_kg']:.2f} kg ({area['total_harvest_tonnes']:.4f} tonnes)")
     model_path = config.model_dir / "residual_model.joblib"
@@ -850,7 +900,12 @@ def command_predict(args) -> int:
         return 0
     try:
         features = build_experiment_features(config, experiment, summary, args.treatment)
-        hybrid = predict_residual(config, features, dssat_yield)
+        hybrid = predict_residual(config, features, dssat_yield,
+                                  validation_region=dssat_location_region(experiment.location))
+    except HybridNotSupported as exc:
+        print(f"Hybrid status: {exc}")
+        print(f"Run ID: {result['run_id']}\nRun archive: {result['run_dir']}")
+        return 0
     except Exception as exc:
         print(f"Hybrid status: FAILED ({type(exc).__name__}: {exc}); DSSAT-only result shown above is not a hybrid result.")
         print(f"Run ID: {result['run_id']}\nRun archive: {result['run_dir']}")
@@ -889,6 +944,15 @@ def _parser() -> argparse.ArgumentParser:
     train = commands.add_parser("train-residual"); train.add_argument("--crop", default="all", help="DSSAT crop folder name, or 'all'"); train.add_argument("--dataset"); train.set_defaults(func=command_train)
     evaluate = commands.add_parser("evaluate"); evaluate.add_argument("--crop", default="all", help="DSSAT crop folder name, or 'all'"); evaluate.add_argument("--dataset"); evaluate.set_defaults(func=command_evaluate)
     show = commands.add_parser("show-evaluation", help="print saved evaluation results without recomputing"); show.set_defaults(func=command_show_evaluation)
+    des_apy = commands.add_parser("import-des-apy", help="normalize a DES APY report for aggregate context only")
+    des_apy.add_argument("--source", required=True, help="downloaded DES CSV or Excel .xlsx/.xlsm file")
+    des_apy.add_argument("--yield-unit", choices=("kg/ha", "quintal/ha", "tonne/ha"), help="unit shown by a source yield column; omit only when deriving from area and production")
+    des_apy.add_argument("--source-url", default=DES_APY_URL)
+    des_apy.add_argument("--retrieved-at-utc", help="optional retrieval timestamp; defaults to the current UTC time")
+    des_apy.add_argument("--area-unit", default="", help="area unit printed in the source report")
+    des_apy.add_argument("--production-unit", default="", help="production unit printed in the source report")
+    des_apy.add_argument("--output", help="optional canonical CSV output path")
+    des_apy.set_defaults(func=command_import_des_apy)
     predict = commands.add_parser("predict"); predict.add_argument("--experiment", required=True); predict.add_argument("--treatment", type=int, default=1); predict.add_argument("--area", type=float, default=1.0); predict.add_argument("--area-unit", choices=("hectares", "acres"), default="hectares"); predict.set_defaults(func=command_predict)
     return parser
 

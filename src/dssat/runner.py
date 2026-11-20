@@ -519,11 +519,8 @@ def run_experiment(config, experiment, treatment: int, timeout: int = 180,
         "working_directory": "DSSAT scratch directory (removed after run)",
         "runtime_seconds": round(time.monotonic() - started, 3),
         "input_files": [
-            f"input/{experiment.experiment_file.name}",
-            *[f"input/Weather/{name}" for name in (scenario_application.get("weather", {}).get("weather_files")
-                                                     or [experiment.weather_file.name])],
-            f"input/Soil/{scenario_application.get('soil', {}).get('file', experiment.soil_file.name)}",
-            f"input/Genotype/{experiment.cultivar_file.name}",
+            f"input/{path.relative_to(archived_input).as_posix()}"
+            for path in sorted(archived_input.rglob("*")) if path.is_file()
         ],
         "output_files": output_names,
         "log_files": ["logs/stdout.txt", "logs/stderr.txt"],

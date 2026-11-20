@@ -124,6 +124,8 @@ def parse_experiment_file(path: Path, data_dir: Path,
     cultivar_name = " ".join(cultivar[3:])
     treatments = []
     treatment_details = {}
+    sequence_component_counts = {}
+    is_sequence = path.suffix.casefold() == ".sqx"
     treatment_section = False
     for line in text.splitlines():
         if line.startswith("*TREATMENTS"):
@@ -133,7 +135,25 @@ def parse_experiment_file(path: Path, data_dir: Path,
             break
         if treatment_section and re.match(r"\s*\d+\s+\d+", line):
             tokens = line.split()
-            treatment_id = int(tokens[0])
+            raw_treatment = tokens[0]
+            # In SQX files, N identifies the whole rotation and R identifies
+            # each crop component. DSSAT's fixed-width N/R fields can run
+            # together once R reaches two digits (for example "110" means
+            # sequence N=1, component R=10), so whitespace splitting alone
+            # invents treatments 110, 111, etc. All components are one run.
+            treatment_id = (int(raw_treatment[0])
+                            if is_sequence and len(raw_treatment) >= 3
+                            else int(raw_treatment))
+            if is_sequence:
+                if treatment_id not in treatment_details:
+                    treatments.append(str(treatment_id))
+                    treatment_details[treatment_id] = {
+                        "treatment_name": f"Sequence {treatment_id}",
+                        "nitrogen_rate_kg_ha": None,
+                        "irrigated": None,
+                    }
+                sequence_component_counts[treatment_id] = sequence_component_counts.get(treatment_id, 0) + 1
+                continue
             treatments.append(str(treatment_id))
             factor_count = len(TREATMENT_FACTOR_COLUMNS)
             treatment_name = " ".join(tokens[4:-factor_count]).strip()
@@ -143,6 +163,10 @@ def parse_experiment_file(path: Path, data_dir: Path,
                 "nitrogen_rate_kg_ha": float(nitrogen_match.group(1)) if nitrogen_match else None,
                 "irrigated": "IRRIG" in treatment_name.upper(),
             }
+    for treatment_id, component_count in sequence_component_counts.items():
+        treatment_details[treatment_id]["treatment_name"] = (
+            f"Sequence {treatment_id} ({component_count} rotation components)"
+        )
     lines = text.splitlines()
     site_index = next((i for i, line in enumerate(lines) if line.startswith(("@SITE", "*SITE"))), None)
     location = ""

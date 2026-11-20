@@ -4,10 +4,10 @@ from pathlib import Path
 import pandas as pd
 
 
-# Conservative Task 7 registry. A crop is eligible only when its measured A-file
-# supplies HWAM and DSSAT Summary supplies the same variable. The generic
-# definition and dry-matter units are documented by DSSAT; crop-specific
-# harvested-product meaning still needs review before expanding this registry.
+# Conservative reviewed yield registry. A crop is eligible only when its
+# measured A-file supplies HWAM and DSSAT Summary supplies the same variable,
+# and the crop module's harvested product has been checked. HWAM uses kg/ha dry
+# matter; variables such as peanut PWAM (pod yield) are not interchangeable.
 # Biomass (CWAM), by-product, and differently defined harvest fields are not
 # substituted for HWAM.
 OBSERVED_YIELD_TARGETS = {
@@ -20,6 +20,7 @@ OBSERVED_YIELD_TARGETS = {
     "GY": {"column": "HWAM", "unit": "kg/ha", "definition": "Guar harvested seed yield at maturity"},
     "ML": {"column": "HWAM", "unit": "kg/ha", "definition": "Pearl millet harvested grain yield at maturity"},
     "MZ": {"column": "HWAM", "unit": "kg/ha", "definition": "Maize harvested grain yield at maturity"},
+    "PN": {"column": "HWAM", "unit": "kg/ha", "definition": "Peanut harvested seed yield at maturity (dry matter)"},
     "PP": {"column": "HWAM", "unit": "kg/ha", "definition": "Pigeon pea harvested seed yield at maturity"},
     "RI": {"column": "HWAM", "unit": "kg/ha", "definition": "Rice harvested grain yield at maturity"},
     "SB": {"column": "HWAM", "unit": "kg/ha", "definition": "Soybean harvested seed yield at maturity"},
@@ -34,6 +35,24 @@ def observed_yield_target(crop_code: str) -> dict | None:
     """Return a reviewed measured-yield field mapping for a DSSAT crop code."""
     target = OBSERVED_YIELD_TARGETS.get(str(crop_code).strip().upper())
     return {"basis": "dry_matter", **target} if target else None
+
+
+def simulation_yield_target(crop_code: str) -> dict:
+    """Describe the crop's harvest output without guessing unsupported crops.
+
+    DSSAT reports HWAM in kg/ha. The crop-specific interpretation is marked
+    verified only for crops whose measured A-file HWAM has been reviewed and
+    paired with the same simulated HWAM in this project.
+    """
+    code = str(crop_code).strip().upper()
+    target = observed_yield_target(code)
+    if target is None:
+        return {
+            "column": "HWAM", "unit": "kg/ha", "basis": "unverified",
+            "definition": "DSSAT harvest weight at maturity; crop-specific product interpretation not reviewed",
+            "verified": False,
+        }
+    return {**target, "verified": True}
 
 
 def calculate_residual(observed_yield: float, mechanistic_yield: float) -> float:

@@ -1,33 +1,31 @@
 {% extends "base.html" %}
 {% block title %}Research readiness · Crop DSSAT Console{% endblock %}
 {% block content %}
-<section class="pagehead"><span class="eyebrow">Scope and data readiness</span><h1>Research direction</h1><p class="muted">A transparent record of agreed product direction, candidate data, and unresolved data-quality questions.</p></section>
-<section class="card"><h2>Project direction</h2><div class="tablewrap"><table><thead><tr><th>Status</th><th>Decision or plan</th></tr></thead><tbody>
-<tr><td><span class="pill">Confirmed</span></td><td>Build a wheat yield forecasting research system for detailed user-provided field inputs, with DSSAT and ML evaluated against DSSAT alone and ML alone.</td></tr>
-<tr><td><span class="pill">Confirmed</span></td><td>First prediction at sowing; output yield per hectare and estimated total plot harvest.</td></tr>
-<tr><td><span class="pill plan">Planned</span></td><td>Potential forecast updates around day 30 and day 60, only if matching time-stamped data supports them.</td></tr>
-<tr><td><span class="pill pending">Pending</span></td><td>Choose target region after verifying suitable data coverage and resolving the data-quality audit.</td></tr>
-<tr><td><span class="pill plan">Planned</span></td><td>Working demonstration target: 30 November 2026. Publication preparation follows.</td></tr>
-<tr><td><span class="pill plan">Research target — unachieved</span></td><td>At least 90% of independent field predictions within ±10% of measured yield. This is a future acceptance target, not current performance.</td></tr>
-<tr><td><span class="pill plan">Future work</span></td><td>Validated uncertainty estimates. No confidence percentage or uncertainty interval is currently claimed.</td></tr>
+<section class="pagehead"><span class="eyebrow">Scope and evidence</span><h1>Research readiness</h1><p class="muted">What the current DSSAT workflow can do, what the benchmark supports, and what still needs field evidence.</p></section>
+
+<section class="card"><h2>Current system</h2><div class="tablewrap"><table><thead><tr><th>Status</th><th>Capability</th></tr></thead><tbody>
+<tr><td><span class="pill">Available</span></td><td>Discovers and runs installed DSSAT crop experiments when the crop module and linked input files are present. This does not mean every DSSAT crop is runnable in this installation.</td></tr>
+<tr><td><span class="pill">Available</span></td><td>Uses selected state and GeoNames settlement coordinates to choose nearby installed experiments, request validated NASA POWER weather where supported, and match complete installed soil profiles within 100 km.</td></tr>
+<tr><td><span class="pill">Available</span></td><td>Applies planting date, nitrogen, irrigation, and plant density when the selected FileX has compatible records. The result page reports whether each value was applied or retained as context.</td></tr>
+<tr><td><span class="pill">Limited</span></td><td>Crop-specific harvested-yield definitions are reviewed for {{ reviewed_yield_crops }} crops in the current training registry. Other installed crops may simulate, but their raw output is not presented as verified yield or hybrid-adjusted yield.</td></tr>
+<tr><td><span class="pill">Evidence limited</span></td><td>The current paired dataset contains {{ paired_summary.records }} experiment-treatment records across {{ paired_summary.crops }} crops. The Evaluation page compares DSSAT, ML-only, and hybrid predictions with five-fold grouped retrospective validation. The saved benchmark shows whether hybrid MAE improved; approval for serving a hybrid is limited to evaluated crop-regions.</td></tr>
 </tbody></table></div>
-<p class="warn" style="margin-top:14px">The current interface runs installed experiment treatments with historical full-season weather. It is not yet the sowing-time or day-30/day-60 product described above.</p></section>
+<p><a class="button" href="/evaluation">View benchmark metrics and crop-region decisions</a></p></section>
 
-<section class="card"><h2>Candidate datasets — not integrated into training</h2><p>Counts and descriptions below are supplied in the project’s current research brief. Verify the original files, variable definitions, access conditions, and provenance before using these values as project data. Candidate record counts must not be added until overlap is resolved.</p>
-<div class="grid">
-<div class="stat"><span class="pill pending">Candidate A</span><strong>5,689 × 49</strong><span class="label">CIMMYT eastern India dataset · six seasons · ten districts (reported summary)</span></div>
-<div class="stat"><span class="pill pending">Candidate B</span><strong>3,735 × 61</strong><span class="label">Earlier sowing-date trial dataset · five seasons (reported summary)</span></div>
-</div>
-<p class="muted">Neither candidate dataset has been incorporated into the current 28-row installed-example DSSAT benchmark or model artifacts. No sowing-time forecast is produced from them.</p></section>
+<section class="card"><h2>Research goals not yet demonstrated</h2><ul>
+<li>Sowing-time and day-30/day-60 forecasts need weather information available at each forecast date and repeated, time-stamped crop observations.</li>
+<li>Independent field-level measured yields are needed to establish performance beyond DSSAT example experiments.</li>
+<li>The 90%-within-±10% field-prediction target is unachieved. Calibrated uncertainty estimates are also not available.</li>
+<li>GeoNames coordinates identify a settlement, and NASA POWER is gridded weather. Neither is an exact farm measurement.</li>
+<li>The selected broad soil-texture value remains context. A complete nearby DSSAT profile may be used; otherwise the source experiment's soil profile is retained.</li>
+</ul></section>
 
-<section class="card"><h2>Open data-audit issues</h2><ul>
-<li>Likely record overlap between candidates; counts are not additive.</li>
-<li>Coordinate inconsistencies among candidate matching records.</li>
-<li>Conflicting units for seed and fertilizer quantities.</li>
-<li>A small number of date discrepancies need source-level review.</li>
-<li>Measured soil profiles are missing.</li>
-<li>Irrigation amounts and urea application dates are missing.</li>
-<li>The supplied tables do not include a complete daily weather series.</li>
-<li>No repeated early-season crop-observation time series is available for validating day-30/day-60 updates.</li>
-</ul><p>These gaps affect what can be represented by DSSAT, what is known at each forecast date, and how independent validation must be designed. Resolve them before claiming field-level forecast accuracy.</p></section>
+<section class="card"><h2>Imported DES outcome context</h2>
+{% if outcome_summary.rows %}
+<p>{{ outcome_summary.rows }} regional outcome records are currently loaded across {{ outcome_summary.crops }} crops and {{ outcome_summary.states }} states. They remain aggregate context and are not residual-training labels.</p>
+{% else %}
+<p>No normalized DES records are currently loaded. The importer can add a downloaded report as separate context data.</p>
+{% endif %}
+<p>District and state averages summarize multiple farms and conditions. They must not be paired with an individual simulation as though they were measured field yields.</p>
+<a class="button" href="/outcomes">Open outcome data and source manifests</a></section>
 {% endblock %}

@@ -35,7 +35,12 @@ def build_experiment_features(config, experiment, summary_row, treatment: int,
     return features
 
 
-def predict_residual(config, features: dict, dssat_yield: float) -> dict | None:
+class HybridNotSupported(ValueError):
+    """Raised when held-out evidence does not cover the requested crop-region."""
+
+
+def predict_residual(config, features: dict, dssat_yield: float,
+                     validation_region: str) -> dict | None:
     model_path = config.model_dir / "residual_model.joblib"
     metadata_path = config.model_dir / "model_metadata.json"
     if not model_path.is_file() or not metadata_path.is_file():
@@ -54,8 +59,15 @@ def predict_residual(config, features: dict, dssat_yield: float) -> dict | None:
     if (evaluation_metadata.get("dataset_sha256") != metadata.get("training_dataset_sha256")
             or residual_eval.get("estimator") != "HistGradientBoostingRegressor"):
         raise ValueError("The held-out evaluation does not match this model and dataset. Re-evaluate before using it.")
-    if not evaluation_metrics.get("pooled_hybrid_beats_dssat_on_mae", False):
-        raise ValueError("Held-out evaluation did not show an improvement over DSSAT alone; no ML-adjusted yield is shown.")
+    support = evaluation_metrics.get("hybrid_supported_regions", [])
+    crop = str(features.get("crop", "")).strip().casefold()
+    approved = any(str(item.get("crop", "")).strip().casefold() == crop
+                   and item.get("region") == validation_region for item in support)
+    if not approved:
+        raise HybridNotSupported(
+            f"No held-out validation supports a hybrid estimate for {features.get('crop', 'this crop')} "
+            f"in {validation_region.replace('|', ', ')}. Showing the DSSAT-only yield."
+        )
     feature_names = metadata.get("features", [])
     missing = [name for name in feature_names if name not in features]
     if not feature_names or missing:

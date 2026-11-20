@@ -1,4 +1,4 @@
-"""Leave-one-experiment-out retrospective benchmark with out-of-fold predictions."""
+"""Grouped five-fold retrospective benchmark with out-of-fold predictions."""
 
 from datetime import datetime, timezone
 import hashlib
@@ -9,9 +9,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import GroupKFold
 
 from .modeling import (ELIGIBLE_FEATURES, ML_ONLY_FEATURES, RANDOM_SEED,
                        RESIDUAL_FEATURES, make_regressor, validate_training_frame)
+from .validation_regions import dssat_location_region, dssat_validation_group
 
 METHOD_COLUMNS = {
     "dssat_only": "dssat_prediction_kg_ha",
@@ -54,23 +56,37 @@ def _dependency_versions() -> dict:
 
 
 def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
-    """Recompute all leave-one-experiment-out predictions and write audit artifacts."""
+    """Recompute grouped five-fold predictions and write audit artifacts."""
     dataset_path, output_dir = Path(dataset_path), Path(output_dir)
     frame = pd.read_csv(dataset_path)
     validate_training_frame(frame)
-    groups = sorted(frame["experiment_id"].astype(str).unique().tolist())
+    if "location" not in frame.columns:
+        raise ValueError("Dataset needs source location values before crop-and-region validation can run.")
+    frame["validation_region"] = frame["location"].map(dssat_location_region)
+    grouped = frame.apply(
+        lambda row: dssat_validation_group(row.get("location", ""), row["experiment_id"]),
+        axis=1, result_type="expand",
+    )
+    frame["validation_group"] = grouped[0]
+    frame["validation_group_type"] = grouped[1]
+    groups = sorted(frame["validation_group"].astype(str).unique().tolist())
     if len(groups) < 2:
-        raise ValueError("Leave-one-experiment-out evaluation requires at least two experiment groups.")
+        raise ValueError("Grouped evaluation requires at least two distinct source groups.")
+    known_region_frame = frame.loc[frame["validation_region"] != "UNKNOWN|UNKNOWN"]
+    region_counts_by_crop = known_region_frame.groupby("crop", dropna=False)["validation_region"].nunique().to_dict()
 
     rows = []
     folds = []
-    raw_groups = frame["experiment_id"].astype(str)
-    for fold_number, held_out in enumerate(groups, start=1):
-        test_mask = raw_groups.eq(held_out)
-        train = frame.loc[~test_mask]
-        test = frame.loc[test_mask]
+    group_types = frame.groupby("validation_group")["validation_group_type"].first().to_dict()
+    n_splits = min(5, len(groups))
+    splitter = GroupKFold(n_splits=n_splits)
+    for fold_number, (train_indices, test_indices) in enumerate(
+            splitter.split(frame, groups=frame["validation_group"]), start=1):
+        train = frame.iloc[train_indices]
+        test = frame.iloc[test_indices]
+        held_out_groups = sorted(test["validation_group"].astype(str).unique().tolist())
         if train.empty or test.empty:
-            raise ValueError(f"Cannot form held-out fold for {held_out}.")
+            raise ValueError(f"Cannot form held-out group fold {fold_number}.")
         # Each pipeline fits its own encoder only on this fold's training data.
         ml_model = make_regressor(ML_ONLY_FEATURES, seed=RANDOM_SEED)
         ml_model.fit(train[ML_ONLY_FEATURES], train["observed_yield_kg_ha"])
@@ -85,7 +101,13 @@ def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
             rows.append({
                 "experiment_id": str(item["experiment_id"]),
                 "treatment_id": int(item["treatment_id"]),
-                "held_out_experiment": held_out,
+                "crop": str(item["crop"]),
+                "validation_region": str(item["validation_region"]),
+                "validation_group": str(item["validation_group"]),
+                "validation_group_type": str(item["validation_group_type"]),
+                "held_out_region": str(item["validation_region"]),
+                "held_out_groups": ";".join(held_out_groups),
+                "held_out_experiment": str(item["experiment_id"]),
                 "fold_number": fold_number,
                 "n_train": int(len(train)), "n_test": int(len(test)),
                 "observed_yield_kg_ha": float(item["observed_yield_kg_ha"]),
@@ -94,15 +116,18 @@ def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
                 "predicted_residual_kg_ha": float(predicted_residual[index]),
                 "hybrid_prediction_kg_ha": float(hybrid_prediction[index]),
             })
-        fold_predictions = [r for r in rows if r["held_out_experiment"] == held_out]
+        fold_predictions = [r for r in rows if r["fold_number"] == fold_number]
         observed = [r["observed_yield_kg_ha"] for r in fold_predictions]
         fold_metrics = {name: regression_metrics(observed, [r[column] for r in fold_predictions])
                         for name, column in METHOD_COLUMNS.items()}
-        folds.append({"fold_number": fold_number, "held_out_experiment": held_out,
+        folds.append({"fold_number": fold_number, "held_out_groups": held_out_groups,
+                      "held_out_group_types": sorted({group_types[group] for group in held_out_groups}),
+                      "held_out_experiments": sorted(test["experiment_id"].astype(str).unique().tolist()),
+                      "n_held_out_experiments": int(test["experiment_id"].nunique()),
                       "training_experiments": sorted(train["experiment_id"].astype(str).unique().tolist()),
                       "n_train": int(len(train)), "n_test": int(len(test)), "metrics": fold_metrics})
 
-    predictions = pd.DataFrame(rows).sort_values(["held_out_experiment", "treatment_id"]).reset_index(drop=True)
+    predictions = pd.DataFrame(rows).sort_values(["fold_number", "experiment_id", "treatment_id"]).reset_index(drop=True)
     if predictions.duplicated(["experiment_id", "treatment_id"]).any() or len(predictions) != len(frame):
         raise RuntimeError("Benchmark integrity failure: each dataset record must receive exactly one OOF prediction.")
     observed = predictions["observed_yield_kg_ha"].to_numpy(dtype=float)
@@ -114,15 +139,47 @@ def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
             "metrics": {name: regression_metrics(subset["observed_yield_kg_ha"], subset[column])
                         for name, column in METHOD_COLUMNS.items()},
         })
+    crop_region = []
+    supported_regions = []
+    regional_predictions = predictions.loc[predictions["validation_region"] != "UNKNOWN|UNKNOWN"]
+    for (crop, region), subset in regional_predictions.groupby(["crop", "validation_region"], sort=True):
+        region_metrics = {name: regression_metrics(subset["observed_yield_kg_ha"], subset[column])
+                          for name, column in METHOD_COLUMNS.items()}
+        independent_region_count = int(region_counts_by_crop.get(crop, 0))
+        better = (region_metrics["hybrid"]["mae_kg_ha"]
+                  < region_metrics["dssat_only"]["mae_kg_ha"])
+        enough_regions = independent_region_count >= 3
+        approved = enough_regions and better
+        decision = ("hybrid_supported" if approved else
+                    "insufficient_independent_regions" if not enough_regions else
+                    "dssat_only_lower_or_equal_mae")
+        item = {
+            "crop": str(crop), "region": str(region), "n": int(len(subset)),
+            "n_independent_regions_for_crop": independent_region_count,
+            "held_out_experiments": sorted(subset["experiment_id"].astype(str).unique().tolist()),
+            "metrics": region_metrics, "hybrid_supported": bool(approved), "decision": decision,
+        }
+        crop_region.append(item)
+        if approved:
+            supported_regions.append({"crop": str(crop), "region": str(region)})
     hybrid_beats_dssat = pooled["hybrid"]["mae_kg_ha"] < pooled["dssat_only"]["mae_kg_ha"]
     metrics = {
         "benchmark_type": "retrospective_historical_full_season_weather",
-        "validation_method": "leave_one_experiment_out",
-        "group_column": "experiment_id",
-        "n_records": int(len(predictions)), "n_experiments": int(len(groups)),
-        "folds": folds, "per_experiment": per_experiment, "pooled_oof": pooled,
+        "validation_method": "5_fold_grouped_oof",
+        "group_column": "validation_group",
+        "n_records": int(len(predictions)), "n_experiments": int(frame["experiment_id"].nunique()),
+        "n_regions": int(frame.loc[frame["validation_region"] != "UNKNOWN|UNKNOWN", "validation_region"].nunique()),
+        "n_validation_groups": len(groups),
+        "n_site_label_groups": sum(group_types[group] == "site_label_only" for group in groups),
+        "n_experiment_only_groups": sum(group_types[group] == "experiment_only" for group in groups),
+        "n_records_without_canonical_region": int(frame["validation_region"].eq("UNKNOWN|UNKNOWN").sum()),
+        "folds": folds, "per_experiment": per_experiment,
+        "crop_region_validation": crop_region,
+        "hybrid_supported_regions": supported_regions,
+        "minimum_independent_regions_per_crop": 3,
+        "pooled_oof": pooled,
         "pooled_hybrid_beats_dssat_on_mae": bool(hybrid_beats_dssat),
-        "interpretation": "Historical full-season weather is used; these results are not evidence of sowing-time or in-season forecast performance.",
+        "interpretation": "Five-fold out-of-fold evaluation keeps each canonical country/admin-1 region together when available. Rows without one are grouped by exact DSSAT site label, or by experiment when the site label is missing. Fallback groups are included in pooled metrics but never count as geographic evidence for hybrid approval. A crop-region is supported only when that crop has at least three canonical regions and lower held-out-region hybrid MAE. Historical full-season weather makes this retrospective, not sowing-time forecast validation.",
     }
     try:
         relative_dataset = dataset_path.resolve().relative_to(Path(__file__).resolve().parents[1]).as_posix()
@@ -132,8 +189,10 @@ def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "dataset": relative_dataset,
         "dataset_sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
-        "record_count": int(len(frame)), "experiment_groups": groups,
-        "grouping_strategy": "LeaveOneGroupOut, with experiment_id as the held-out group; preprocessing fitted separately inside every training fold.",
+        "record_count": int(len(frame)), "experiment_groups": sorted(frame["experiment_id"].astype(str).unique().tolist()),
+        "validation_regions": sorted(frame.loc[frame["validation_region"] != "UNKNOWN|UNKNOWN", "validation_region"].unique().tolist()),
+        "validation_groups": groups,
+        "grouping_strategy": "Five-fold GroupKFold: canonical country/admin-1 groups where available; otherwise exact DSSAT location labels; rows with no usable location are grouped by experiment. Fallback groups are not geographic validation evidence. Preprocessing is fitted separately inside every fold.",
         "random_seeds": {"ml_only_gradient_boosting": RANDOM_SEED, "residual_gradient_boosting": RANDOM_SEED},
         "models": {"ml_only": {"estimator": "HistGradientBoostingRegressor", "max_iter": 150,
                                  "features": ML_ONLY_FEATURES},

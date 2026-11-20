@@ -18,6 +18,10 @@ NUMERIC_FEATURES = [
 ELIGIBLE_FEATURES = CATEGORICAL_FEATURES + NUMERIC_FEATURES
 RESIDUAL_FEATURES = ELIGIBLE_FEATURES
 ML_ONLY_FEATURES = CATEGORICAL_FEATURES + [name for name in NUMERIC_FEATURES if name != "dssat_yield_kg_ha"]
+# Keep unobserved management, weather, and soil values missing instead of
+# inventing values. HistGradientBoostingRegressor supports missing numeric
+# feature values natively; DSSAT and measured outcomes must remain present.
+MISSING_ALLOWED_NUMERIC_FEATURES = set(NUMERIC_FEATURES) - {"dssat_yield_kg_ha"}
 RANDOM_SEED = 42
 PAIRING_PROVENANCE_COLUMNS = {
     "pairing_status", "pairing_basis", "source_experiment_id",
@@ -26,7 +30,8 @@ PAIRING_PROVENANCE_COLUMNS = {
     "simulation_filex", "dssat_run_id", "dssat_summary_file",
     "simulation_yield_variable", "dssat_treatment_id", "management_source_file",
     "management_treatment_id", "weather_files_used", "soil_file_used",
-    "observation_level", "crop_code",
+    "observation_level", "crop_code", "simulation_yield_definition",
+    "simulation_yield_unit", "simulation_yield_basis", "yield_definition_verified",
 }
 
 
@@ -53,6 +58,16 @@ def validate_training_frame(frame) -> None:
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"Dataset is missing required columns: {sorted(missing)}")
+    # Trial labels and local resource files may omit feature values. Keep those
+    # values missing instead of guessing; HistGradientBoostingRegressor can
+    # learn with missing numeric features natively.
+    for column in MISSING_ALLOWED_NUMERIC_FEATURES:
+        raw = frame[column]
+        numeric = pd.to_numeric(raw, errors="coerce")
+        invalid = raw.notna() & raw.astype(str).str.strip().ne("") & numeric.isna()
+        if invalid.any():
+            raise ValueError(f"{column} contains values that are neither numeric nor missing.")
+        frame[column] = numeric.astype(float)
     if len(frame) < 2 or frame["experiment_id"].nunique() < 2:
         raise ValueError("Need at least two records from at least two experiments for experiment-grouped evaluation.")
     if frame.duplicated(["experiment_id", "treatment_id"]).any():
@@ -75,6 +90,10 @@ def validate_training_frame(frame) -> None:
         raise ValueError("Measured and simulated yield variables must use the same reviewed crop target.")
     if not frame["observed_yield_unit"].astype(str).eq("kg/ha").all() or not frame["observed_yield_basis"].astype(str).eq("dry_matter").all():
         raise ValueError("This residual model requires yields normalized to kg/ha dry matter.")
+    if (not frame["simulation_yield_unit"].astype(str).eq("kg/ha").all()
+            or not frame["simulation_yield_basis"].astype(str).eq("dry_matter").all()
+            or not frame["yield_definition_verified"].astype(str).str.casefold().isin({"true", "1"}).all()):
+        raise ValueError("Residual training requires a reviewed harvested-product definition normalized to kg/ha dry matter.")
     for column in ("observed_treatment_id", "dssat_treatment_id", "management_treatment_id"):
         if not pd.to_numeric(frame[column], errors="coerce").eq(
                 pd.to_numeric(frame["treatment_id"], errors="coerce")).all():
@@ -87,9 +106,17 @@ def validate_training_frame(frame) -> None:
     if not filex_stems.eq(observed_stems).all():
         raise ValueError("Measured A-files must share a filename stem with the paired DSSAT FileX.")
     values = frame[list(required)].select_dtypes(include="number")
-    if not values.empty and not np.isfinite(values.to_numpy(dtype=float)).all():
+    required_values = values.drop(columns=[column for column in MISSING_ALLOWED_NUMERIC_FEATURES if column in values],
+                                  errors="ignore")
+    if not required_values.empty and not np.isfinite(required_values.to_numpy(dtype=float)).all():
         raise ValueError("Dataset contains non-finite numeric outcomes or features.")
-    if frame[list(required)].isna().any().any():
+    for column in MISSING_ALLOWED_NUMERIC_FEATURES:
+        present = frame[column].dropna().to_numpy(dtype=float)
+        if present.size and not np.isfinite(present).all():
+            raise ValueError(f"{column} contains non-finite values.")
+    required_without_optional = frame[list(required)].drop(
+        columns=[column for column in MISSING_ALLOWED_NUMERIC_FEATURES if column in frame], errors="ignore")
+    if required_without_optional.isna().any().any():
         raise ValueError("Dataset contains missing identifiers, outcomes, or model features.")
     expected = frame["observed_yield_kg_ha"] - frame["dssat_yield_kg_ha"]
     if not expected.sub(frame["residual_kg_ha"]).abs().le(1e-6).all():

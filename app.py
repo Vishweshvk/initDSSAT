@@ -1,7 +1,9 @@
-"""Compact offline Flask interface for historical wheat simulations and evaluation."""
+"""Compact offline Flask interface for multi-crop DSSAT simulations and evaluation."""
 
 import logging
+import hashlib
 import json
+import csv
 import math
 from dataclasses import replace
 from types import SimpleNamespace
@@ -14,16 +16,20 @@ from markupsafe import Markup
 from src.dashboard import dashboard_charts
 from src.dssat.config import DssatConfig, project_directories
 from src.dssat.data.repository import discover_experiments, validate_simulation
+from src.dssat.data.observations import OBSERVED_YIELD_TARGETS, simulation_yield_target
 from src.dssat.exceptions import DssatError
 from src.dssat.runner import _weather_stations_from_experiment, run_experiment
-from src.prediction import build_experiment_features, load_latest_benchmark, predict_residual
+from src.prediction import (HybridNotSupported, build_experiment_features,
+                            load_latest_benchmark, predict_residual)
 from src.records import append_prediction_record
 from src.location import get_place, list_states, location_provenance, search_places
+from src.validation_regions import india_state_region
 from src.dssat.data.weather import read_weather
 from src.dssat.data.power_weather import fetch_power_icasa
 from src.dssat.data.soil import find_nearest_soil_profile
 from src.features.soil_features import aggregate_soil_profile
 from src.dssat.parser import parse_summary
+from src.external_outcomes import load_des_apy_context
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +41,18 @@ def _coordinate(value, lower, upper):
     except (TypeError, ValueError):
         return None
     return number if lower <= number <= upper else None
+
+
+def _sha256_if_file(path: Path) -> str | None:
+    """Fingerprint an input file when it is present; preserve missing as missing."""
+    try:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def _experiment_coordinates(config, experiment, audit=None):
@@ -306,6 +324,7 @@ def predict():
         soil_used_id = soil_application.get("profile_id", experiment.soil_id)
         row = result["summary"].iloc[0]
         dssat_yield = float(row["HWAM"])
+        yield_target = simulation_yield_target(experiment.crop_code)
         planting_yyddd = int(row["PDAT"])
         planting_year, planting_day = divmod(planting_yyddd, 1000)
         if planting_year < 100:
@@ -348,7 +367,7 @@ def predict():
                                                soil_id=soil_used_id)
         treatment_details = experiment.treatment_details[treatment]
 
-        hybrid, model_error = None, None
+        hybrid, model_error, model_note = None, None, None
         model_path = config.model_dir / "residual_model.joblib"
         model_metadata_path = config.model_dir / "model_metadata.json"
         has_model_files = model_path.is_file() and model_metadata_path.is_file()
@@ -358,13 +377,18 @@ def predict():
             saved_model_metadata = {}
         model_available = has_model_files and saved_model_metadata.get("estimator_name") == "HistGradientBoostingRegressor"
         model_needs_retrain = has_model_files and not model_available
-        if model_available:
+        if not yield_target["verified"]:
+            model_note = "The crop's harvested-product definition is not reviewed; showing the raw DSSAT output without residual adjustment."
+        elif model_available:
             try:
                 features = build_experiment_features(config, experiment, row, treatment,
                                                     soil_file=soil_used_file, soil_id=soil_used_id)
-                hybrid = predict_residual(config, features, dssat_yield)
+                hybrid = predict_residual(config, features, dssat_yield,
+                                          validation_region=india_state_region(place["state_name"]))
                 if hybrid is None:
                     model_error = "Model artifacts became unavailable during this request."
+            except HybridNotSupported as exc:
+                model_note = str(exc)
             except Exception as exc:
                 logging.exception("Residual model prediction failed for run_id=%s", result["run_id"])
                 model_error = "Hybrid calculation failed; the DSSAT result below is not a hybrid prediction. Check the application log for details."
@@ -389,8 +413,15 @@ def predict():
                             *(weather_metadata.get("weather_files") or [experiment.weather_file.name]),
                             soil_used_file.name, experiment.cultivar_file.name],
         }
+        run_dir = Path(result.get("run_dir", ""))
+        input_hashes = {
+            relative_path.as_posix(): digest
+            for filename in (result.get("metadata", {}).get("input_files") or [])
+            if (relative_path := Path(filename)).is_relative_to("input")
+            and (digest := _sha256_if_file(run_dir / relative_path)) is not None
+        }
         csv_path = append_prediction_record(config.project_data_dir, {
-            "run_id": result["run_id"], "crop": getattr(experiment, "crop", "Wheat"),
+            "run_id": result["run_id"], "crop": getattr(experiment, "crop", "Unknown crop"),
             "experiment_id": experiment.experiment_id, "treatment_id": treatment,
             "experiment_location": experiment.location,
             "dssat_planting_date": planting_date,
@@ -409,6 +440,11 @@ def predict():
             "experiment_latitude": _coordinate(row.get("XLAT"), -90, 90),
             "experiment_longitude": _coordinate(row.get("LONG"), -180, 180),
             "dssat_yield_kg_ha": dssat_yield,
+            "dssat_yield_variable": yield_target["column"],
+            "dssat_yield_definition": yield_target["definition"],
+            "dssat_yield_unit": yield_target["unit"],
+            "dssat_yield_basis": yield_target["basis"],
+            "yield_definition_verified": yield_target["verified"],
             "observed_yield_kg_ha": observed_yield, "observed_residual_kg_ha": observed_residual,
             "predicted_residual_kg_ha": hybrid["predicted_residual_kg_ha"] if hybrid else None,
             "ml_adjusted_yield_kg_ha": hybrid["hybrid_yield_kg_ha"] if hybrid else None,
@@ -417,10 +453,20 @@ def predict():
             "model_version": hybrid["model_version"] if hybrid else None,
             "model_evaluation_mae_kg_ha": hybrid["evaluation_mae_kg_ha"] if hybrid else None,
             "dssat_version": config.version(),
+            "weather_source": weather_metadata.get("source", "DSSAT installed weather file"),
+            "weather_metadata_json": json.dumps(weather_metadata, ensure_ascii=False),
+            "soil_source": soil_application.get("source", "DSSAT experiment soil profile"),
+            "soil_metadata_json": json.dumps(soil_application, ensure_ascii=False),
+            "input_file_sha256_json": json.dumps(input_hashes, ensure_ascii=False, sort_keys=True),
+            "residual_model_sha256": _sha256_if_file(model_path) if hybrid else None,
+            "run_metadata_json": json.dumps(result.get("metadata", {}), ensure_ascii=False, default=str),
+            "record_schema_version": "2",
         })
         return render_template("result.html", experiment=experiment, treatment=treatment,
                                yield_kg_ha=dssat_yield, field_inputs=field_inputs,
-                               hybrid=hybrid, model_error=model_error, model_available=model_available,
+                               yield_target=yield_target,
+                               hybrid=hybrid, model_error=model_error, model_note=model_note,
+                               model_available=model_available,
                                provenance=provenance, growth_rows=len(result["growth"]) if result["growth"] is not None else 0,
                                comparison=comparison, benchmark=benchmark, observed_yield=observed_yield,
                                observed_residual=observed_residual, csv_path=csv_path,
@@ -451,7 +497,46 @@ def evaluation():
 
 @app.get("/research")
 def research():
-    return render_template("research.html")
+    _, project_data_dir, _ = project_directories()
+    outcomes, _ = load_des_apy_context(project_data_dir)
+    paired_summary = {"records": 0, "crops": 0}
+    paired_path = project_data_dir / "processed" / "dssat_hybrid_dataset.csv"
+    if paired_path.is_file():
+        try:
+            with paired_path.open("r", newline="", encoding="utf-8-sig") as stream:
+                for row in csv.DictReader(stream):
+                    paired_summary["records"] += 1
+                    if row.get("crop"):
+                        paired_summary.setdefault("crop_names", set()).add(row["crop"])
+            paired_summary["crops"] = len(paired_summary.pop("crop_names", set()))
+        except (OSError, UnicodeError, csv.Error):
+            paired_summary = {"records": 0, "crops": 0}
+    outcome_summary = {
+        "rows": int(len(outcomes)),
+        "crops": int(outcomes["crop"].nunique()) if not outcomes.empty else 0,
+        "states": int(outcomes["state"].nunique()) if not outcomes.empty else 0,
+    }
+    return render_template("research.html", outcome_summary=outcome_summary,
+                           paired_summary=paired_summary,
+                           reviewed_yield_crops=len(OBSERVED_YIELD_TARGETS))
+
+
+@app.get("/outcomes")
+def outcomes():
+    _, project_data_dir, _ = project_directories()
+    frame, manifests = load_des_apy_context(project_data_dir)
+    if not frame.empty:
+        frame = frame.sort_values(["year", "state", "crop", "district"], ascending=[False, True, True, True])
+    records = frame.head(250).to_dict("records")
+    summary = {
+        "rows": int(len(frame)),
+        "district_rows": int(frame["aggregation_level"].eq("district").sum()) if not frame.empty else 0,
+        "state_rows": int(frame["aggregation_level"].eq("state").sum()) if not frame.empty else 0,
+        "crops": int(frame["crop"].nunique()) if not frame.empty else 0,
+        "states": int(frame["state"].nunique()) if not frame.empty else 0,
+    }
+    return render_template("outcomes.html", rows=records, summary=summary,
+                           manifests=manifests, total_rows=len(frame))
 
 
 if __name__ == "__main__":
