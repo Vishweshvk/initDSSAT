@@ -22,7 +22,7 @@ from src.dssat.runner import _weather_stations_from_experiment, run_experiment
 from src.prediction import (HybridNotSupported, build_experiment_features,
                             load_latest_benchmark, predict_residual)
 from src.records import append_prediction_record
-from src.location import get_place, list_states, location_provenance, search_places
+from src.location import get_place, list_places, location_provenance
 from src.validation_regions import india_state_region
 from src.dssat.data.weather import read_weather
 from src.dssat.data.power_weather import fetch_power_icasa
@@ -33,6 +33,14 @@ from src.external_outcomes import load_des_apy_context
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+
+# Crops commonly cultivated in Maharashtra, intersected with installed DSSAT
+# experiments that have passed the local simulation support audit.
+MAHARASHTRA_CROP_CODES = {
+    "CH", "CO", "CP", "ML", "MZ", "PN", "PP", "RI", "SB", "SC",
+    "SF", "SG", "SU", "WH",
+}
+MAHARASHTRA_STATE = "Maharashtra"
 
 
 def _coordinate(value, lower, upper):
@@ -143,36 +151,38 @@ def _pooled_comparison(metrics: dict | None) -> dict | None:
 def index():
     try:
         config = DssatConfig.discover()
-        experiments = _successful_experiments(config)
+        experiments = [experiment for experiment in _successful_experiments(config)
+                       if experiment.crop_code.upper() in MAHARASHTRA_CROP_CODES]
         crops = sorted({experiment.crop for experiment in experiments})
         error = None
     except DssatError as exc:
         experiments, crops, error = [], [], str(exc)
     try:
         _, location_data_dir, _ = project_directories()
-        states = list_states(location_data_dir)
+        places = list_places(location_data_dir, MAHARASHTRA_STATE, min_population=5000)
         location_error = None
     except (OSError, ValueError) as exc:
-        states, location_error = [], str(exc)
+        places, location_error = [], str(exc)
     seasons = ["Kharif / Monsoon", "Rabi / Winter", "Zaid / Summer", "Spring", "Autumn", "Other"]
     soil_types = ["Sandy", "Sandy loam", "Loam", "Silt loam", "Clay loam", "Clay", "Other / local soil"]
     return render_template("index.html", experiments=experiments, crops=crops, error=error,
-                           states=states, seasons=seasons, soil_types=soil_types,
-                           location_error=location_error)
+                           places=places, location_error=location_error,
+                           seasons=seasons, soil_types=soil_types)
 
 
 @app.get("/api/places")
 def places_api():
     _, project_data_dir, _ = project_directories()
     state = request.args.get("state", "").strip()
-    query = request.args.get("q", "").strip()
+    if state.casefold() != MAHARASHTRA_STATE.casefold():
+        return jsonify({"error": "This project currently supports Maharashtra locations only."}), 400
     try:
-        matches = search_places(project_data_dir, state, query)
+        matches = list_places(project_data_dir, MAHARASHTRA_STATE, min_population=5000)
     except (OSError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 503
     return jsonify([{
         "geoname_id": item["geoname_id"], "name": item["name"],
-        "label": f"{item['name']} · admin area {item['admin2_code']}" if item["admin2_code"] else item["name"],
+        "label": f"{item['name']} · area {item['admin2_code']}" if item["admin2_code"] else item["name"],
         "latitude": item["latitude"], "longitude": item["longitude"],
     } for item in matches])
 
@@ -197,6 +207,10 @@ def predict():
             "nitrogen_timing": request.form.get("nitrogen_timing", "planting").strip(),
             "plant_density_ha": request.form.get("plant_density", "").strip(),
         }
+        if field_inputs["state"].casefold() != MAHARASHTRA_STATE.casefold():
+            raise ValueError("This simulation form currently accepts Maharashtra locations only.")
+        if not crop:
+            raise ValueError("Choose a Maharashtra-supported crop before running the simulation.")
         if not all(field_inputs[key] for key in ("state", "city", "geoname_id", "season", "planting_date", "soil_type", "plant_density_ha")):
             raise ValueError("Complete each required field before running the simulation.")
         try:
@@ -217,7 +231,11 @@ def predict():
             raise ValueError("Nitrogen, plant density, and irrigation schedule must be valid numbers.") from exc
         if field_inputs["irrigation"] not in {"rainfed", "irrigated"}:
             raise ValueError("Choose rainfed or irrigated for irrigation.")
-        eligible_experiments = _successful_experiments(config, crop=crop)
+        maharashtra_experiments = [item for item in _successful_experiments(config)
+                                   if item.crop_code.upper() in MAHARASHTRA_CROP_CODES]
+        if crop not in {item.crop for item in maharashtra_experiments}:
+            raise ValueError("Choose a crop from the Maharashtra DSSAT crop list.")
+        eligible_experiments = [item for item in maharashtra_experiments if item.crop == crop]
         experiment = next((item for item in eligible_experiments
                            if item.experiment_id == experiment_id), None)
         if experiment is None and eligible_experiments:
@@ -401,6 +419,7 @@ def predict():
         observed_yield = observed_residual = None
         provenance = {
             "dssat_version": config.version(),
+            "dssat_executable_sha256": result.get("metadata", {}).get("dssat_executable_sha256"),
             "model_version": hybrid["model_version"] if hybrid else None,
             "run_id": result["run_id"],
             "experiment": experiment.experiment_id,
@@ -420,6 +439,9 @@ def predict():
             if (relative_path := Path(filename)).is_relative_to("input")
             and (digest := _sha256_if_file(run_dir / relative_path)) is not None
         }
+        execution_hashes = result.get("metadata", {}).get("execution_control_file_sha256", {})
+        input_hashes.update({f"execution/{name}": digest
+                             for name, digest in execution_hashes.items()})
         csv_path = append_prediction_record(config.project_data_dir, {
             "run_id": result["run_id"], "crop": getattr(experiment, "crop", "Unknown crop"),
             "experiment_id": experiment.experiment_id, "treatment_id": treatment,
@@ -453,6 +475,7 @@ def predict():
             "model_version": hybrid["model_version"] if hybrid else None,
             "model_evaluation_mae_kg_ha": hybrid["evaluation_mae_kg_ha"] if hybrid else None,
             "dssat_version": config.version(),
+            "dssat_executable_sha256": result.get("metadata", {}).get("dssat_executable_sha256"),
             "weather_source": weather_metadata.get("source", "DSSAT installed weather file"),
             "weather_metadata_json": json.dumps(weather_metadata, ensure_ascii=False),
             "soil_source": soil_application.get("source", "DSSAT experiment soil profile"),
@@ -460,7 +483,7 @@ def predict():
             "input_file_sha256_json": json.dumps(input_hashes, ensure_ascii=False, sort_keys=True),
             "residual_model_sha256": _sha256_if_file(model_path) if hybrid else None,
             "run_metadata_json": json.dumps(result.get("metadata", {}), ensure_ascii=False, default=str),
-            "record_schema_version": "2",
+            "record_schema_version": "3",
         })
         return render_template("result.html", experiment=experiment, treatment=treatment,
                                yield_kg_ha=dssat_yield, field_inputs=field_inputs,

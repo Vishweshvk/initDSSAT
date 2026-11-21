@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Evaluation · Crop DSSAT Console{% endblock %}
 {% block content %}
-<section class="pagehead"><span class="eyebrow">Out-of-fold performance</span><h1>Benchmark dashboard</h1><p class="muted">Each validation group is held out as a unit: canonical region when available, otherwise DSSAT site label or experiment. Every shown prediction comes from a model trained without that group.</p></section>
+<section class="pagehead"><span class="eyebrow">Out-of-fold performance</span><h1>Benchmark dashboard</h1><p class="muted">Each validation group is held out as a unit: canonical region when available, otherwise DSSAT site label or experiment. ML predictions are made by models that did not train on that group; DSSAT is the simulation baseline.</p></section>
 <div class="warn"><strong>Retrospective benchmark only.</strong> Weather features summarize the completed crop season. These results are not evidence of sowing-time or in-season forecast performance. Hybrid use is approved only for a matching crop and region with enough independent regions and lower held-out MAE.</div>
 {% if metrics and charts %}
 <section class="grid3">
@@ -25,6 +25,7 @@
 {% for fold in metrics.folds %}{% for key,label in [("dssat_only","DSSAT"),("ml_only","ML-only"),("hybrid","Hybrid")] %}{% set row=fold.metrics[key] %}<tr><td>{{ fold.held_out_groups|join(", ") }}</td><td>{{ fold.held_out_experiments|join(", ") }}</td><td>{{ fold.n_train }}</td><td>{{ fold.n_test }}</td><td>{{ label }}</td><td>{{ "%.1f"|format(row.mae_kg_ha) }}</td><td>{{ "%.1f"|format(row.rmse_kg_ha) }}</td><td>{{ "%+.1f"|format(row.mean_signed_error_kg_ha) }}</td><td>{% if row.r2 is not none %}{{ "%.3f"|format(row.r2) }}{% else %}undefined{% endif %}</td><td>{% if row.within_10_percent_pct is not none %}{{ "%.1f"|format(row.within_10_percent_pct) }}%{% else %}undefined{% endif %}</td></tr>{% endfor %}{% endfor %}
 </tbody></table></div></section>
 <section class="card"><h2>Method and reproducibility</h2><p>Evaluation is recomputed each time with <code>python -m cli.main evaluate --crop all</code>. The saved final all-data model does not generate these benchmark predictions. Preprocessors are fit only on each fold’s training regions. The separate <code>train-residual</code> command fits the residual model on all eligible dataset rows; serving still checks the crop-region approval list.</p>
+{% if metadata %}<p class="tagline">Report generated {{ metadata.created_at_utc }} · dataset <code>{{ metadata.dataset }}</code> · SHA-256 <code>{{ metadata.dataset_sha256 }}</code></p>{% endif %}
 {% if metadata %}<details><summary>Feature lists, seeds, dataset hash, and package versions</summary><pre>{{ metadata | tojson(indent=2) }}</pre></details>{% endif %}
 </section>
 {% else %}<section class="card"><h2>No benchmark artifacts found</h2><p>Run evaluation after creating or confirming the matched simulation/observation dataset. This evaluates the current processed CSV and writes out-of-fold predictions, metrics, and reproducibility metadata.</p><pre>python -m cli.main evaluate --crop all</pre></section>{% endif %}

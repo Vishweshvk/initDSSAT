@@ -83,6 +83,29 @@ def search_places(project_data_dir: Path, state: str, query: str, limit: int = 2
     return [dict(row) for row in rows]
 
 
+def list_places(project_data_dir: Path, state: str, min_population: int = 5000) -> list[dict]:
+    """List larger populated places for a region, suitable for a city dropdown.
+
+    GeoNames' India extract includes many villages and locality records. The
+    dropdown uses records with a reported population of at least 5,000 to keep
+    the choice list usable while retaining cities and larger towns.
+    """
+    database = _ensure_index(project_data_dir)
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute("""SELECT geoname_id,name,ascii_name,latitude,longitude,
+            admin1_code,admin2_code,population,modified_date,source
+            FROM places WHERE state_name=? AND population>=?
+              AND feature_code IN ('PPL','PPLA','PPLA2','PPLA3')
+            ORDER BY name COLLATE NOCASE, population DESC, geoname_id""",
+            (state, int(min_population))).fetchall()
+    places = [dict(row) for row in rows]
+    for place in places:
+        place["label"] = (f"{place['name']} · area {place['admin2_code']}"
+                          if place["admin2_code"] else place["name"])
+    return places
+
+
 def get_place(project_data_dir: Path, state: str, geoname_id: int) -> dict | None:
     database = _ensure_index(project_data_dir)
     with sqlite3.connect(database) as connection:

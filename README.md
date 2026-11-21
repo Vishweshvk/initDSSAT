@@ -92,6 +92,8 @@ python app.py
 
 Open `http://127.0.0.1:5000`. The interface has Prediction, Evaluation, Real-world outcomes, and Research readiness pages. It does not offer unimplemented sowing or in-season forecasting controls. If an evaluation run fails, inspect its message and the relevant run's `logs/` and `metadata.json`.
 
+Each completed web run adds one row to `<project-data-dir>/predictions/scenario_results.csv` (`data/` by default) and archives its staged inputs, outputs, logs, and metadata under `<project-data-dir>/runs/<run-id>/`. The row records requested and applied inputs, crop-specific yield definition and units, location and weather/soil provenance, DSSAT output, and hybrid details when available. SHA-256 fingerprints cover the archived DSSAT inputs and run-control files, the DSSAT executable, and the residual model when used. Missing values stay blank; older rows retain their available information when the CSV schema is upgraded.
+
 `audit-crops --run-probes` writes `data/diagnostics/crop_support_audit.json` and `.csv`. A probe is a compatibility check for one installed experiment per crop; it does not validate crop yield definitions or field-level accuracy. See [crop support audit](docs/crop_support_audit.md) for interpreting the report and preparing crop-specific observation parsing.
 
 ## Benchmark design and artifacts

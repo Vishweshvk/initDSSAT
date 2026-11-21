@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 import ctypes
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,18 @@ import uuid
 from .exceptions import DssatRunError
 from .parser import parse_plantgro, parse_summary
 from .data.repository import dssat_module_for_crop, validate_simulation
+
+
+def _sha256_if_file(path: Path) -> str | None:
+    """Return a file fingerprint, keeping unavailable files explicitly missing."""
+    try:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def _short_path(path: Path) -> Path:
@@ -509,12 +522,19 @@ def run_experiment(config, experiment, treatment: int, timeout: int = 180,
             error = f"DSSAT output {yield_column} yield could not be validated."
             error_type = "InvalidYieldOutput"
 
+    execution_controls = ("DSSATPRO.v48", "profile_overrides.json", batch_name)
+    execution_control_hashes = {
+        name: digest for name in execution_controls
+        if (digest := _sha256_if_file(run_dir / name)) is not None
+    }
     metadata = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "run_id": run_id,
         "experiment_id": experiment.experiment_id,
         "treatment_id": int(treatment),
         "dssat_version": config.version(),
+        "dssat_executable_sha256": _sha256_if_file(config.executable),
+        "execution_control_file_sha256": execution_control_hashes,
         "command": command,
         "working_directory": "DSSAT scratch directory (removed after run)",
         "runtime_seconds": round(time.monotonic() - started, 3),

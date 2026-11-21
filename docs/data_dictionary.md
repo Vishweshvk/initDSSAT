@@ -15,12 +15,13 @@
 | `location`, `year`, `planting_date` | Experimental site and planting time | `.WHX` and DSSAT Summary output |
 | `run_id` | Unique local simulation run | Run metadata; excluded from ML features |
 | `dssat_version` | DSSAT release used for run | Installation log/output; provenance only |
+| `dssat_executable_sha256` | SHA-256 fingerprint of the DSSAT executable used | Empty only when the executable cannot be read; lets a later run identify whether the binary changed |
 | `weather_source` / `weather_metadata_json` | Weather provider and retrieval/validation details, including fallback status | NASA POWER metadata or installed DSSAT station record; JSON remains empty when unavailable |
 | `soil_source` / `soil_metadata_json` | Soil profile source and matching/application details | Installed DSSAT profile or matched local profile; JSON remains empty when unavailable |
-| `input_file_sha256_json` | SHA-256 fingerprints of every actual staged DSSAT input file, including the scenario FileX and its weather, soil, and genotype dependencies | Hashes are computed from the archived input snapshot; absent files are not listed |
+| `input_file_sha256_json` | SHA-256 fingerprints of every actual staged DSSAT input file plus execution-control files (`DSSATPRO.v48`, profile overrides, and batch file) | Hashes are computed from the archived run snapshot; absent files are not listed |
 | `residual_model_sha256` | SHA-256 fingerprint of the residual model artifact used for a hybrid result | Empty for DSSAT-only runs |
 | `run_metadata_json` | Archived runner metadata, applied input statuses, and DSSAT run details | Serialized from the completed DSSAT run |
-| `record_schema_version` | CSV record layout version | Current version: `2`; older rows are migrated with blank values for new fields |
+| `record_schema_version` | CSV record layout version | Current version: `3`; older rows are migrated with blank values for new fields |
 
 ## Outcomes
 

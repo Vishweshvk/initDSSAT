@@ -14,3 +14,5 @@ Quick setup in PowerShell from the extracted project directory:
   .\demo.ps1
 
 Current paired data contain 640 experiment-treatment records across 17 reviewed crop-yield definitions. The saved five-fold grouped evaluation uses 93 experiments and 62 validation groups; pooled MAE is 522.09 kg/ha for DSSAT-only, 1,307.78 kg/ha for ML-only, and 599.05 kg/ha for the hybrid. Hybrid does not beat DSSAT-only on pooled MAE, and only separately approved crop-regions can use it. This is retrospective evaluation with full-season weather, not sowing-time forecasting or independent farm-field validation. See FINAL_CHECK.md and data/evaluation/ for current metrics and the initial historical verification.
+
+Scenario CSV schema version 3 preserves requested/applied inputs and output provenance. It fingerprints archived DSSAT inputs and execution controls, the DSSAT executable, and the residual model when used. Full run files remain in `data/runs/<run-id>/`; these local run archives and processed benchmark artifacts are excluded from Git.
