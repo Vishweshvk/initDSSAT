@@ -7,7 +7,7 @@ import csv
 import math
 from dataclasses import replace
 from types import SimpleNamespace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
@@ -100,6 +100,42 @@ def _distance_km(lat1, lon1, lat2, lon2):
     return 2 * radius * math.asin(min(1, math.sqrt(value)))
 
 
+def _planting_date_for_experiment(experiment, month: int, day: int) -> date:
+    """Apply a user's month/day to the planting year in the source FileX.
+
+    DSSAT requires a year and the installed weather is historical. The UI does
+    not ask the user to guess a weather year; use the experiment's own calendar.
+    """
+    lines = experiment.experiment_file.read_text(encoding="latin-1", errors="replace").splitlines()
+    section, headers, source_date = "", {}, None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("*"):
+            section, headers = stripped.upper(), {}
+        elif stripped.startswith("@"):
+            headers = {name.upper(): index for index, name in
+                       enumerate(stripped.split()[1:], start=1)}
+        elif stripped and stripped.split()[0].isdigit() and section.startswith("*PLANTING DETAILS"):
+            values = stripped.split()
+            position = headers.get("PDATE")
+            if position is not None and position < len(values):
+                source_date = values[position]
+                break
+
+    if not source_date or not source_date.isdigit():
+        raise ValueError(f"The selected DSSAT experiment {experiment.experiment_id} has no usable source planting date.")
+    year, _ = divmod(int(source_date), 1000)
+    year += 1900 if year >= 50 else 2000
+    try:
+        return datetime(year, month, day).date()
+    except ValueError as exc:
+        if month == 2 and day == 29:
+            raise ValueError(
+                f"February 29 is not available in the selected experiment's weather year ({year}). Choose another date."
+            ) from exc
+        raise ValueError("Choose a valid planting month and day.") from exc
+
+
 def _evaluation_config():
     _, project_data_dir, model_dir = project_directories()
     return SimpleNamespace(project_data_dir=project_data_dir, model_dir=model_dir)
@@ -164,10 +200,12 @@ def index():
     except (OSError, ValueError) as exc:
         places, location_error = [], str(exc)
     seasons = ["Kharif / Monsoon", "Rabi / Winter", "Zaid / Summer", "Spring", "Autumn", "Other"]
+    months = [(month, datetime(2000, month, 1).strftime("%B")) for month in range(1, 13)]
+    days = range(1, 32)
     soil_types = ["Sandy", "Sandy loam", "Loam", "Silt loam", "Clay loam", "Clay", "Other / local soil"]
     return render_template("index.html", experiments=experiments, crops=crops, error=error,
                            places=places, location_error=location_error,
-                           seasons=seasons, soil_types=soil_types)
+                           seasons=seasons, months=months, days=days, soil_types=soil_types)
 
 
 @app.get("/api/places")
@@ -199,6 +237,8 @@ def predict():
             "geoname_id": request.form.get("geoname_id", "").strip(),
             "season": request.form.get("season", "").strip(),
             "planting_date": request.form.get("planting_date", "").strip(),
+            "planting_month": request.form.get("planting_month", "").strip(),
+            "planting_day": request.form.get("planting_day", "").strip(),
             "soil_type": request.form.get("soil_type", "").strip(),
             "irrigation": request.form.get("irrigation", "rainfed").strip(),
             "irrigation_interval_days": request.form.get("irrigation_interval_days", "7").strip(),
@@ -211,7 +251,7 @@ def predict():
             raise ValueError("This simulation form currently accepts Maharashtra locations only.")
         if not crop:
             raise ValueError("Choose a Maharashtra-supported crop before running the simulation.")
-        if not all(field_inputs[key] for key in ("state", "city", "geoname_id", "season", "planting_date", "soil_type", "plant_density_ha")):
+        if not all(field_inputs[key] for key in ("state", "city", "geoname_id", "season", "soil_type", "plant_density_ha")):
             raise ValueError("Complete each required field before running the simulation.")
         try:
             geoname_id = int(field_inputs["geoname_id"])
@@ -221,7 +261,16 @@ def predict():
         if place is None:
             raise ValueError("That location is not in the local GeoNames list for the selected state. Choose a suggestion again.")
         field_inputs["city"] = place["name"]
-        datetime.strptime(field_inputs["planting_date"], "%Y-%m-%d")
+        if field_inputs["planting_date"]:
+            requested_date = datetime.strptime(field_inputs["planting_date"], "%Y-%m-%d").date()
+            planting_month, planting_day = requested_date.month, requested_date.day
+        else:
+            try:
+                planting_month, planting_day = int(field_inputs["planting_month"]), int(field_inputs["planting_day"])
+                # Validate the chosen month/day independently of any simulation year.
+                datetime(2000, planting_month, planting_day)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Choose a valid planting month and day.") from exc
         try:
             field_inputs["nitrogen_rate_kg_ha"] = float(field_inputs["nitrogen_rate_kg_ha"])
             field_inputs["plant_density_ha"] = float(field_inputs["plant_density_ha"])
@@ -258,6 +307,9 @@ def predict():
         location_distance_km = coordinate_matches[0][0] if coordinate_matches else None
         if location_matched:
             experiment = coordinate_matches[0][1]
+        requested_planting_date = _planting_date_for_experiment(experiment, planting_month, planting_day)
+        field_inputs["planting_month_day"] = requested_planting_date.strftime("%B %d").replace(" 0", " ")
+        field_inputs["planting_date"] = requested_planting_date.isoformat()
         available_treatments = experiment.treatment_details
         requested_irrigated = field_inputs["irrigation"] == "irrigated"
         treatment = min(

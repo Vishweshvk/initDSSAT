@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -166,11 +167,72 @@ def _yyddd(iso_date: str) -> str:
     return f"{parsed.year % 100:02d}{parsed.timetuple().tm_yday:03d}"
 
 
+def _date_from_yyddd(value: str) -> datetime.date | None:
+    try:
+        year, day = divmod(int(value), 1000)
+        year += 1900 if year >= 50 else 2000
+        return datetime.strptime(f"{year:04d}{day:03d}", "%Y%j").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _replace_data_tokens(line: str, updates: dict[int, str]) -> str:
+    """Replace FileX table values while preserving the original column spacing."""
+    matches = list(re.finditer(r"\S+", line))
+    for index in sorted(updates, reverse=True):
+        if index >= len(matches):
+            continue
+        match = matches[index]
+        end = matches[index + 1].start() if index + 1 < len(matches) else match.end()
+        width = end - match.start()
+        value = str(updates[index])
+        if len(value) > width:
+            raise ValueError(f"FileX value {value!r} exceeds the available field width.")
+        line = line[:match.start()] + value.ljust(width) + line[end:]
+    return line
+
+
 def _apply_scenario_to_filex(path: Path, treatment: int, scenario: dict) -> dict:
     """Apply common FileX values and return what the selected format accepted."""
     lines = path.read_text(encoding="latin-1", errors="replace").splitlines()
     planting_date = _yyddd(scenario["planting_date"])
-    simulation_start_date = _yyddd(scenario.get("weather_simulation_start_date", scenario["planting_date"]))
+    simulation_start = scenario.get("weather_simulation_start_date")
+    planting_day = datetime.strptime(scenario["planting_date"], "%Y-%m-%d").date()
+    if simulation_start:
+        # Weather providers may report the planting day as their first date.
+        # DSSAT needs a pre-plant day to initialize the crop from the FileX
+        # initial conditions, so never stage SDATE on or after planting.
+        try:
+            provided_start = datetime.strptime(simulation_start, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            provided_start = None
+        if provided_start is None or provided_start >= planting_day:
+            simulation_start = (planting_day - timedelta(days=1)).isoformat()
+    else:
+        section = ""
+        headers: dict[str, int] = {}
+        source_planting = source_start = None
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("*"):
+                section, headers = stripped.upper(), {}
+            elif stripped.startswith("@"):
+                headers = {name.upper(): position for position, name in
+                           enumerate(stripped.split()[1:], start=1)}
+            elif stripped and stripped.split()[0].isdigit():
+                values = stripped.split()
+                if section.startswith("*PLANTING DETAILS") and "PDATE" in headers:
+                    source_planting = values[headers["PDATE"]]
+                elif section.startswith("*SIMULATION CONTROLS") and "SDATE" in headers:
+                    source_start = values[headers["SDATE"]]
+        original_planting = _date_from_yyddd(source_planting) if source_planting else None
+        original_start = _date_from_yyddd(source_start) if source_start else None
+        if original_planting and original_start:
+            preplant_days = max(1, (original_planting - original_start).days)
+            simulation_start = (planting_day - timedelta(days=preplant_days)).isoformat()
+        else:
+            simulation_start = (planting_day - timedelta(days=1)).isoformat()
+    simulation_start_date = _yyddd(simulation_start)
     density_per_m2 = float(scenario["plant_density_ha"]) / 10000.0
     section = ""
     headers: dict[str, int] = {}
@@ -209,29 +271,26 @@ def _apply_scenario_to_filex(path: Path, treatment: int, scenario: dict) -> dict
             continue
         if section.startswith("*PLANTING DETAILS") and "PDATE" in headers:
             row = tokens
+            updates = {}
             position = headers.get("PDATE")
             if position is not None and position < len(row):
-                row[position] = planting_date
+                updates[position] = planting_date
                 planting_rows += 1
             for key in ("PPOP", "PPOE"):
                 position = headers.get(key)
                 if position is not None and position < len(row):
-                    row[position] = f"{density_per_m2:.4f}"
+                    updates[position] = f"{density_per_m2:.4f}".rstrip("0").rstrip(".")
                     density_rows += 1
-            lines[index] = " " + " ".join(row)
+            lines[index] = _replace_data_tokens(line, updates)
         elif section.startswith("*SIMULATION CONTROLS") and "SDATE" in headers:
-            row = tokens
             position = headers["SDATE"]
-            if position < len(row):
-                row[position] = simulation_start_date
-                lines[index] = " " + " ".join(row)
+            if position < len(tokens):
+                lines[index] = _replace_data_tokens(line, {position: simulation_start_date})
                 simulation_start_rows += 1
         elif section.startswith("*INITIAL CONDITIONS") and "ICDAT" in headers:
-            row = tokens
             position = headers["ICDAT"]
-            if position < len(row):
-                row[position] = simulation_start_date
-                lines[index] = " " + " ".join(row)
+            if position < len(tokens):
+                lines[index] = _replace_data_tokens(line, {position: simulation_start_date})
                 initial_condition_rows += 1
         elif section.startswith("*FERTILIZERS (INORGANIC)") and "FAMN" in headers:
             fertilizer_rows.append((index, tokens))
@@ -246,13 +305,14 @@ def _apply_scenario_to_filex(path: Path, treatment: int, scenario: dict) -> dict
             event_count = 2 if split else 1
             for event_index, (line_index, row) in enumerate(fertilizer_rows):
                 amount = total_n / event_count if split and event_index < event_count else (total_n if not split and event_index == 0 else 0.0)
+                updates = {}
                 if "FDATE" in fertilizer_header:
-                    row[fertilizer_header["FDATE"]] = planting_date
+                    updates[fertilizer_header["FDATE"]] = planting_date
                 if split and event_index == 1 and "FDATE" in fertilizer_header:
                     split_date = datetime.strptime(scenario["planting_date"], "%Y-%m-%d") + timedelta(days=30)
-                    row[fertilizer_header["FDATE"]] = _yyddd(split_date.date().isoformat())
-                row[fertilizer_header["FAMN"]] = f"{amount:.2f}"
-                lines[line_index] = " " + " ".join(row)
+                    updates[fertilizer_header["FDATE"]] = _yyddd(split_date.date().isoformat())
+                updates[fertilizer_header["FAMN"]] = f"{amount:.2f}"
+                lines[line_index] = _replace_data_tokens(lines[line_index], updates)
             application["nitrogen"] = {"status": "applied", "event_count": event_count,
                                        "amount_kg_n_ha": total_n, "timing": scenario["nitrogen_timing"]}
     # Replace DSSAT's dated irrigation schedule with the requested regular
@@ -277,15 +337,13 @@ def _apply_scenario_to_filex(path: Path, treatment: int, scenario: dict) -> dict
         application["planting_date"] = {"status": "applied", "date": scenario["planting_date"], "rows_updated": planting_rows}
         if simulation_start_rows:
             application["simulation_start"] = {
-                "status": "applied",
-                "date": scenario.get("weather_simulation_start_date", scenario["planting_date"]),
-                "reason": "The run starts one day before planting so DSSAT has pre-plant weather for initialization.",
+                "status": "applied", "date": simulation_start,
+                "reason": "The source FileX pre-plant interval is preserved so DSSAT has weather for initialization.",
             }
         if initial_condition_rows:
             application["initial_conditions_date"] = {
-                "status": "applied",
-                "date": scenario.get("weather_simulation_start_date", scenario["planting_date"]),
-                "reason": "The installed initial soil/crop state was carried forward to the selected simulation start.",
+                "status": "applied", "date": simulation_start,
+                "reason": "The installed initial soil/crop state is carried forward to the selected simulation start.",
             }
     if density_rows:
         application["plant_density"] = {"status": "applied", "plants_per_hectare": float(scenario["plant_density_ha"]),
@@ -313,8 +371,7 @@ def _apply_soil_profile_override(path: Path, soil_id: str) -> int:
             row = stripped.split()
             position = headers["ID_SOIL"]
             if position < len(row):
-                row[position] = soil_id
-                lines[index] = " " + " ".join(row)
+                lines[index] = _replace_data_tokens(lines[index], {position: soil_id})
                 updated += 1
     if updated:
         path.write_text("\n".join(lines) + "\n", encoding="latin-1")
