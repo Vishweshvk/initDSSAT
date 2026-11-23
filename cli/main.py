@@ -25,7 +25,7 @@ from src.dssat.runner import run_experiment
 from src.dssat.parser import parse_summary
 from src.evaluation import evaluate_dataset
 from src.external_outcomes import (DES_APY_URL, normalize_des_apy)
-from src.modeling import RANDOM_SEED, RESIDUAL_FEATURES, make_regressor, validate_training_frame
+from src.modeling import MODEL_SPECS, RANDOM_SEED, RESIDUAL_FEATURES, make_regressor, validate_training_frame
 from src.prediction import (HybridNotSupported, area_estimate,
                             build_experiment_features, predict_residual)
 from src.validation_regions import dssat_location_region
@@ -756,7 +756,8 @@ def _dependency_versions() -> dict:
 
 
 def _backup_model_artifacts(model_dir: Path) -> Path | None:
-    filenames = ("residual_model.joblib", "model_metadata.json", "model_metrics.json")
+    filenames = ("residual_model.joblib", "extra_trees_residual_model.joblib",
+                 "ridge_residual_model.joblib", "model_metadata.json", "model_metrics.json")
     existing = [model_dir / name for name in filenames if (model_dir / name).is_file()]
     if not existing:
         return None
@@ -779,25 +780,36 @@ def command_train(args) -> int:
         raise FileNotFoundError(f"Training dataset not found: {source}")
     frame = pd.read_csv(source)
     validate_training_frame(frame)
-    model = make_regressor(RESIDUAL_FEATURES, seed=RANDOM_SEED)
-    model.fit(frame[RESIDUAL_FEATURES], frame["residual_kg_ha"])
     config.model_dir.mkdir(parents=True, exist_ok=True)
     backup_dir = _backup_model_artifacts(config.model_dir)
-    model_path = config.model_dir / "residual_model.joblib"
-    temporary_model = config.model_dir / "residual_model.joblib.tmp"
     import joblib
-    joblib.dump(model, temporary_model)
-    temporary_model.replace(model_path)
+    artifact_names = {"hist_gradient_boosting": "residual_model.joblib",
+                      "extra_trees": "extra_trees_residual_model.joblib",
+                      "ridge": "ridge_residual_model.joblib"}
+    for model_name in MODEL_SPECS:
+        model = make_regressor(RESIDUAL_FEATURES, seed=RANDOM_SEED, model_name=model_name)
+        model.fit(frame[RESIDUAL_FEATURES], frame["residual_kg_ha"])
+        model_path = config.model_dir / artifact_names[model_name]
+        temporary_model = model_path.with_suffix(model_path.suffix + ".tmp")
+        joblib.dump(model, temporary_model)
+        temporary_model.replace(model_path)
     metadata = {
-        "model_version": "4.0", "model_type": "Histogram gradient boosting residual regression",
+        "model_version": "5.0", "model_type": "Multi-model residual regression",
         "estimator_name": "HistGradientBoostingRegressor",
+        "models": {key: {**spec, "artifact": artifact_names[key],
+                          "target": "observed_yield_kg_ha - dssat_yield_kg_ha"}
+                   for key, spec in MODEL_SPECS.items()},
         "training_dataset": source.name, "training_dataset_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "training_record_count": int(len(frame)), "training_experiments": sorted(frame["experiment_id"].astype(str).unique().tolist()),
         "dssat_version": config.version(), "features": RESIDUAL_FEATURES,
         "categorical_features": ["crop", "cultivar", "weather_station", "soil_id"],
         "numeric_features": [name for name in RESIDUAL_FEATURES if name not in {"crop", "cultivar", "weather_station", "soil_id"}],
         "trained_at_utc": datetime.now(timezone.utc).isoformat(), "random_seed": RANDOM_SEED,
-        "estimator_parameters": {"max_iter": 150, "l2_regularization": 1.0},
+        "estimator_parameters": {
+            "hist_gradient_boosting": {"max_iter": 150, "l2_regularization": 1.0},
+            "extra_trees": {"n_estimators": 250, "min_samples_leaf": 2, "max_features": 0.9},
+            "ridge": {"alpha": 10.0},
+        },
         "fit_scope": "All dataset rows for a deployable artifact. Benchmark performance is reported separately from out-of-fold evaluation.",
         "pairing_policy": "Training rows are accepted only when measured yield and DSSAT yield share the crop experiment and treatment, carry a successful unmodified run ID, and include weather/soil/management source provenance.",
         "residual_definition": "measured field yield - DSSAT yield, both in the reviewed crop-specific unit",
@@ -812,7 +824,9 @@ def command_train(args) -> int:
     legacy_metrics = config.model_dir / "model_metrics.json"
     if legacy_metrics.exists():
         legacy_metrics.unlink()
-    print(f"Saved final all-data residual model: {model_path}")
+    print("Saved final all-data residual models:")
+    for artifact in artifact_names.values():
+        print(f"  {config.model_dir / artifact}")
     print(f"Training rows: {len(frame)}; experiment groups: {frame['experiment_id'].nunique()}")
     print(f"Prior model backup: {backup_dir if backup_dir else 'none'}")
     print("This training operation does not calculate or claim benchmark performance; run `evaluate` separately.")

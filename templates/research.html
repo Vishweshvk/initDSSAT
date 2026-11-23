@@ -1,31 +1,28 @@
 {% extends "base.html" %}
 {% block title %}Research readiness · Crop DSSAT Console{% endblock %}
 {% block content %}
-<section class="pagehead"><span class="eyebrow">Scope and evidence</span><h1>Research readiness</h1><p class="muted">What the current DSSAT workflow can do, what the benchmark supports, and what still needs field evidence.</p></section>
+<section class="pagehead"><span class="eyebrow">Project status</span><h1>Research readiness</h1><p class="muted">Current capabilities, measured benchmark evidence, and the limits that remain before field use.</p></section>
 
 <section class="card"><h2>Current system</h2><div class="tablewrap"><table><thead><tr><th>Status</th><th>Capability</th></tr></thead><tbody>
-<tr><td><span class="pill">Available</span></td><td>Discovers and runs installed DSSAT crop experiments when the crop module and linked input files are present. This does not mean every DSSAT crop is runnable in this installation.</td></tr>
-<tr><td><span class="pill">Available</span></td><td>Uses selected state and GeoNames settlement coordinates to choose nearby installed experiments, request validated NASA POWER weather where supported, and match complete installed soil profiles within 100 km.</td></tr>
-<tr><td><span class="pill">Available</span></td><td>Applies planting date, nitrogen, irrigation, and plant density when the selected FileX has compatible records. The result page reports whether each value was applied or retained as context.</td></tr>
-<tr><td><span class="pill">Limited</span></td><td>Crop-specific harvested-yield definitions are reviewed for {{ reviewed_yield_crops }} crops in the current training registry. Other installed crops may simulate, but their raw output is not presented as verified yield or hybrid-adjusted yield.</td></tr>
-<tr><td><span class="pill">Evidence limited</span></td><td>The current paired dataset contains {{ paired_summary.records }} experiment-treatment records across {{ paired_summary.crops }} crops. The Evaluation page compares DSSAT, ML-only, and hybrid predictions with five-fold grouped retrospective validation. The saved benchmark shows whether hybrid MAE improved; approval for serving a hybrid is limited to evaluated crop-regions.</td></tr>
+<tr><td><span class="pill">Available</span></td><td>Runs crop experiments that are present and runnable in the installed DSSAT data. The Maharashtra form limits choices to its configured crop shortlist; an installed DSSAT crop is not automatically available for every location.</td></tr>
+<tr><td><span class="pill">Available</span></td><td>Uses GeoNames settlement coordinates to find nearby DSSAT experiments and complete soil profiles. NASA POWER weather is used only when the request and experiment data can be matched safely; otherwise the installed experiment weather is retained and identified in the result provenance.</td></tr>
+<tr><td><span class="pill">Available</span></td><td>Attempts to apply planting month/day, nitrogen, irrigation, and plant density to compatible FileX records. Every value is reported as applied or context-only, so a requested setting is not mistaken for a DSSAT change.</td></tr>
+<tr><td><span class="pill">Limited</span></td><td>Crop-specific harvested-yield definitions are reviewed for {{ reviewed_yield_crops }} crops in the current registry. Other installed crops can still produce raw DSSAT output, but the app does not label that output as verified harvested yield or serve it as an ML-adjusted yield.</td></tr>
+<tr><td><span class="pill">Evidence limited</span></td><td>The paired dataset currently contains {{ paired_summary.records }} experiment-treatment records across {{ paired_summary.crops }} crops. Evaluation compares DSSAT with ML-only and three residual estimators using grouped retrospective holdouts. Hybrid output is enabled only for crop-regions that pass the saved evidence rule; other scenarios remain DSSAT-only.</td></tr>
 </tbody></table></div>
 <p><a class="button" href="/evaluation">View benchmark metrics and crop-region decisions</a></p></section>
 
+<section class="card"><h2>Residual ML workspace</h2><p>DSSAT output remains separate from three learned residual estimates: Histogram Gradient Boosting, Extra Trees, and Ridge Regression. Each model learns <code>measured yield − DSSAT yield</code> from eligible paired records. Its estimate is shown as DSSAT yield plus a model-predicted residual, and only supported crop-region estimates can be presented as hybrid results.</p>
+{% if model_summary.models %}<p><strong>Installed model artifacts:</strong> {{ model_summary.models|join(", ") }}.</p>{% else %}<p>No compatible model artifacts are currently available. Train the residual models after confirming the paired dataset and benchmark.</p>{% endif %}
+{% if model_summary.metrics %}<p><strong>Saved grouped benchmark:</strong> {{ model_summary.metrics.n_records }} paired records, {{ model_summary.metrics.n_experiments }} experiment groups, and {{ model_summary.metrics.n_regions }} canonical regions. The Evaluation page reports model-level errors and crop-region support.</p>{% else %}<p>No saved grouped benchmark is available yet; hybrid predictions remain unavailable until evaluation confirms eligible support.</p>{% endif %}
+<p class="warn">Synthetic demonstration records are excluded from training and evaluation. Management suggestions are exploratory scenarios from paired records, not causal recommendations; each suggested change must be checked with a new DSSAT run.</p><a class="button" href="/evaluation">Compare model outputs and accuracy</a></section>
+
 <section class="card"><h2>Research goals not yet demonstrated</h2><ul>
 <li>Sowing-time and day-30/day-60 forecasts need weather information available at each forecast date and repeated, time-stamped crop observations.</li>
-<li>Independent field-level measured yields are needed to establish performance beyond DSSAT example experiments.</li>
+<li>Independent field-level measured yields are needed to establish performance beyond the paired DSSAT experiment dataset.</li>
 <li>The 90%-within-±10% field-prediction target is unachieved. Calibrated uncertainty estimates are also not available.</li>
 <li>GeoNames coordinates identify a settlement, and NASA POWER is gridded weather. Neither is an exact farm measurement.</li>
 <li>The selected broad soil-texture value remains context. A complete nearby DSSAT profile may be used; otherwise the source experiment's soil profile is retained.</li>
 </ul></section>
 
-<section class="card"><h2>Imported DES outcome context</h2>
-{% if outcome_summary.rows %}
-<p>{{ outcome_summary.rows }} regional outcome records are currently loaded across {{ outcome_summary.crops }} crops and {{ outcome_summary.states }} states. They remain aggregate context and are not residual-training labels.</p>
-{% else %}
-<p>No normalized DES records are currently loaded. The importer can add a downloaded report as separate context data.</p>
-{% endif %}
-<p>District and state averages summarize multiple farms and conditions. They must not be paired with an individual simulation as though they were measured field yields.</p>
-<a class="button" href="/outcomes">Open outcome data and source manifests</a></section>
 {% endblock %}

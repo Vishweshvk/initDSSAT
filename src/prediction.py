@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from .dssat.data.weather import read_weather
@@ -37,6 +38,119 @@ def build_experiment_features(config, experiment, summary_row, treatment: int,
 
 class HybridNotSupported(ValueError):
     """Raised when held-out evidence does not cover the requested crop-region."""
+
+
+def predict_residual_models(config, features: dict, dssat_yield: float,
+                            validation_region: str) -> dict:
+    """Return separate residual-model estimates and their validation support status."""
+    from .modeling import MODEL_SPECS
+
+    metadata_path = config.model_dir / "model_metadata.json"
+    if not metadata_path.is_file():
+        return {}
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    evaluation_dir = Path(config.project_data_dir) / "evaluation"
+    evaluation_metadata_path = evaluation_dir / "metadata.json"
+    evaluation_metrics_path = evaluation_dir / "metrics.json"
+    if not evaluation_metadata_path.is_file() or not evaluation_metrics_path.is_file():
+        raise ValueError("Run grouped held-out evaluation before using residual models.")
+    evaluation_metadata = json.loads(evaluation_metadata_path.read_text(encoding="utf-8"))
+    evaluation_metrics = json.loads(evaluation_metrics_path.read_text(encoding="utf-8"))
+    if evaluation_metadata.get("dataset_sha256") != metadata.get("training_dataset_sha256"):
+        raise ValueError("Residual models and grouped evaluation do not match the current training dataset.")
+
+    support = evaluation_metrics.get("supported_regions_by_model", {})
+    crop = str(features.get("crop", "")).strip().casefold()
+    outputs = {}
+    for key, spec in MODEL_SPECS.items():
+        model_meta = metadata.get("models", {}).get(key)
+        artifact_name = model_meta.get("artifact") if model_meta else None
+        model_path = config.model_dir / artifact_name if artifact_name else None
+        if not model_path or not model_path.is_file():
+            continue
+        feature_names = metadata.get("features", [])
+        missing = [name for name in feature_names if name not in features]
+        if not feature_names or missing:
+            raise ValueError(f"Trained model inputs do not match this experiment; missing: {missing or 'feature list'}.")
+        model = joblib.load(model_path)
+        frame = pd.DataFrame([{name: features[name] for name in feature_names}])
+        residual = float(model.predict(frame)[0])
+        if not math.isfinite(residual):
+            raise ValueError(f"{spec['label']} returned a non-finite residual.")
+        output_key = {"hist_gradient_boosting": "hybrid", "extra_trees": "extra_trees", "ridge": "ridge"}[key]
+        is_supported = any(str(item.get("crop", "")).strip().casefold() == crop
+                           and item.get("region") == validation_region
+                           for item in support.get(output_key, []))
+        metrics = evaluation_metrics.get("pooled_oof", {}).get(output_key, {})
+        outputs[key] = {
+            "label": spec["label"], "estimator": spec["estimator"],
+            "predicted_residual_kg_ha": residual,
+            "estimated_yield_kg_ha": float(dssat_yield) + residual,
+            "supported_for_crop_region": is_supported,
+            "evaluation_mae_kg_ha": metrics.get("mae_kg_ha"),
+        }
+    return outputs
+
+
+def management_scenarios(config, features: dict, dssat_yield: float,
+                         applied_inputs: dict | None = None) -> list[dict]:
+    """Suggest dataset-bounded ML what-if settings; these are screening ideas, not DSSAT reruns."""
+    metadata_path = config.model_dir / "model_metadata.json"
+    if not metadata_path.is_file():
+        return []
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    dataset_path = Path(config.project_data_dir) / "processed" / metadata.get("training_dataset", "")
+    if not dataset_path.is_file():
+        return []
+    training = pd.read_csv(dataset_path)
+    crop_rows = training.loc[training["crop"].astype(str).str.casefold()
+                             == str(features.get("crop", "")).casefold()]
+    if crop_rows.empty:
+        return []
+    applied_inputs = applied_inputs or {}
+    # Offer a setting only when it was actually applied in the DSSAT run.
+    usable = {"nitrogen_rate_kg_ha": applied_inputs.get("nitrogen", {}).get("status") == "applied",
+              "irrigated": applied_inputs.get("irrigation", {}).get("status") == "applied"}
+    if not any(usable.values()):
+        return []
+    current = {name: features.get(name) for name in ("nitrogen_rate_kg_ha", "irrigated")}
+    candidate_rows = []
+    if usable["nitrogen_rate_kg_ha"] and "nitrogen_rate_kg_ha" in crop_rows:
+        observed_n = pd.to_numeric(crop_rows["nitrogen_rate_kg_ha"], errors="coerce").dropna()
+        if not observed_n.empty:
+            for quantile in (0.25, 0.5, 0.75):
+                value = float(observed_n.quantile(quantile))
+                if abs(value - float(current["nitrogen_rate_kg_ha"] or 0)) > 1:
+                    candidate_rows.append(("nitrogen_rate_kg_ha", value,
+                                           f"N at {int(quantile * 100)}th percentile of paired {features['crop']} records"))
+    if usable["irrigated"]:
+        candidate_rows.append(("irrigated", 1 - int(bool(current["irrigated"])),
+                               "Switch irrigation category to compare against paired records"))
+
+    baseline = predict_residual_models(config, features, dssat_yield, validation_region="")
+    baseline_values = [item["estimated_yield_kg_ha"] for item in baseline.values()]
+    if not baseline_values:
+        return []
+    baseline_mean = float(np.mean(baseline_values))
+    scenarios = []
+    for feature_name, value, description in candidate_rows:
+        candidate = dict(features)
+        candidate[feature_name] = value
+        estimates = predict_residual_models(config, candidate, dssat_yield, validation_region="")
+        values = [item["estimated_yield_kg_ha"] for item in estimates.values()]
+        if len(values) < 2:
+            continue
+        mean = float(np.mean(values))
+        improvements = sum(estimate > baseline_mean for estimate in values)
+        if mean > baseline_mean and improvements >= 2:
+            scenarios.append({"input": "Nitrogen" if feature_name == "nitrogen_rate_kg_ha" else "Irrigation",
+                              "value": (f"{value:.0f} kg N/ha" if feature_name == "nitrogen_rate_kg_ha"
+                                        else ("Irrigated" if value else "Rainfed")),
+                              "description": description,
+                              "ensemble_estimate_kg_ha": mean,
+                              "change_vs_current_ml_estimate_kg_ha": mean - baseline_mean,
+                              "model_agreement": f"{improvements}/{len(values)} models higher"})
+    return sorted(scenarios, key=lambda item: item["change_vs_current_ml_estimate_kg_ha"], reverse=True)[:3]
 
 
 def predict_residual(config, features: dict, dssat_yield: float,

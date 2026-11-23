@@ -21,6 +21,7 @@ FIELDS = [
     "observed_yield_kg_ha", "observed_residual_kg_ha", "predicted_residual_kg_ha",
     "ml_adjusted_yield_kg_ha", "dssat_harvest_kg", "ml_adjusted_harvest_kg",
     "model_evaluation_mae_kg_ha", "residual_formula", "yield_formula", "harvest_formula",
+    "ml_model_outputs_json", "management_suggestions_json",
     "model_version", "dssat_version", "dssat_executable_sha256",
     "weather_source", "weather_metadata_json",
     "soil_source", "soil_metadata_json", "input_file_sha256_json",

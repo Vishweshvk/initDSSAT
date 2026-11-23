@@ -10,7 +10,7 @@ The app runs DSSAT first. A histogram-gradient-boosting model may then estimate 
 2. Runs a selected treatment with the installed DSSAT executable in a unique project run folder. The installed DSSAT data are read from their configured location; run inputs and output logs are kept in the project archive.
 3. Reads the configured crop-specific DSSAT harvest output and pairs it with the matching crop observation file when a reviewed yield mapping is available.
 4. Builds a verified paired dataset with residual `observed yield − DSSAT yield` and documented historical season weather and soil features.
-5. Recomputes a five-fold grouped retrospective benchmark for DSSAT alone, ML-only yield, and DSSAT plus a learned gradient-boosting residual.
+5. Recomputes a five-fold grouped retrospective benchmark for DSSAT and three residual learners: Histogram Gradient Boosting, Extra Trees, and Ridge Regression. The result page keeps DSSAT output separate from all ML estimates.
 6. Lets a user scale an experimental yield per hectare to a selected area. That arithmetic does not make an experiment representative of an arbitrary farm.
 
 The web form fixes the state to Maharashtra and offers GeoNames cities/towns with population at least 5,000. It asks for crop, season, planting month/day, soil-texture context, irrigation, nitrogen, and plant density. **It does not ask for a year.** It maps the selected month/day to the planting year recorded in the selected DSSAT FileX experiment, so DSSAT uses a year present in that experiment's historical weather rather than a typed current year. For a single-station experiment, it requests NASA POWER weather for the mapped date when possible; otherwise it uses installed experiment weather and records the fallback. It matches a complete georeferenced DSSAT soil profile only when one is within 100 km of the selected settlement. The result page reports which values were applied and which were context only. Season and the broad soil-texture selection are currently context only. The selected city is a settlement point, not an exact field location. Evaluation uses realized full-season historical weather, so its metrics are not sowing-time or day-30/day-60 forecast accuracy.
@@ -33,7 +33,7 @@ No API credentials are currently required. NASA POWER is the only live data API 
 1. Install DSSAT-CSM 4.8.6 and the crop experiment, Weather, Soil, and Genotype files needed for the crops you want to run; configure `.env` as shown below.
 2. If the city list is absent, download `IN.zip` and `admin1CodesASCII.txt` as described above and run the GeoNames importer.
 3. For ML correction, make sure matching crop observation A-files or compatible measured field-trial records exist, then rebuild and validate the paired dataset and train/evaluate the model using the commands below. `data/processed/`, `data/evaluation/`, and `models/` are gitignored local artifacts; without compatible artifacts, the app intentionally returns DSSAT-only output.
-4. DES APY reports are optional and are only needed for the `/outcomes` context page. They do not enable ML correction.
+4. DES APY reports are optional aggregate context data. They do not enable ML correction and are not used as field-level residual labels.
 
 ## Setup on Windows PowerShell
 
@@ -112,7 +112,7 @@ python -m cli.main predict --experiment RORO7401 --treatment 1 --area 2 --area-u
 python app.py
 ```
 
-Open `http://127.0.0.1:5000`. The interface has Prediction, Evaluation, Real-world outcomes, and Research readiness pages. If port 5000 is occupied, start the app on another port, for example:
+Open `http://127.0.0.1:5000`. The interface has Prediction, Evaluation, and Research readiness pages. If port 5000 is occupied, start the app on another port, for example:
 
 ```powershell
 python -c "from app import app; app.run(host='127.0.0.1', port=5058, debug=False)"
@@ -120,17 +120,21 @@ python -c "from app import app; app.run(host='127.0.0.1', port=5058, debug=False
 
 It does not offer unimplemented sowing or in-season forecasting controls. If a run fails, inspect its message and the relevant run's `logs/`, `output/WARNING.OUT`, and `metadata.json`.
 
-Each completed web run adds one row to `<project-data-dir>/predictions/scenario_results.csv` (`data/` by default) and archives its staged inputs, outputs, logs, and metadata under `<project-data-dir>/runs/<run-id>/`. These generated run records are local and gitignored. The CSV records the mapped DSSAT planting date, requested/applied inputs, crop-specific yield definition and units, location and weather/soil provenance, DSSAT output, and hybrid details when available. SHA-256 fingerprints cover archived DSSAT inputs and run-control files, the DSSAT executable, and the residual model when used. Missing values stay blank; older rows retain available information when the CSV schema is upgraded.
+Each completed web run adds one row to `<project-data-dir>/predictions/scenario_results.csv` (`data/` by default) and archives its staged inputs, outputs, logs, and metadata under `<project-data-dir>/runs/<run-id>/`. These generated run records are local and gitignored. The CSV records the mapped DSSAT planting date, requested/applied inputs, crop-specific yield definition and units, location and weather/soil provenance, DSSAT output, separate ML outputs, and management screening suggestions. SHA-256 fingerprints cover archived DSSAT inputs and run-control files, the DSSAT executable, and the residual model when used. Missing values stay blank; older rows retain available information when the CSV schema is upgraded.
 
 `audit-crops --run-probes` writes `data/diagnostics/crop_support_audit.json` and `.csv`. A probe is a compatibility check for one installed experiment per crop; it does not validate crop yield definitions or field-level accuracy. See [crop support audit](docs/crop_support_audit.md) for interpreting the report and preparing crop-specific observation parsing.
 
 ## Benchmark design and artifacts
 
-`evaluate` uses five-fold grouped out-of-fold validation. Canonical country/admin-1 groups stay together; where that metadata is missing it groups by the exact DSSAT site label, then by experiment if no location is available. Fallback groups contribute to pooled metrics but never count as geographic evidence for hybrid approval. Fold-local scikit-learn pipelines fit `OneHotEncoder` only on each training fold. Every observation gets exactly one out-of-fold prediction. Crop-region decisions are reported separately; the hybrid is approved only when a crop has at least three independent canonical regions and its held-out regional MAE is below DSSAT's. The three candidates are:
+`evaluate` uses five-fold grouped out-of-fold validation. Canonical country/admin-1 groups stay together; where that metadata is missing it groups by the exact DSSAT site label, then by experiment if no location is available. Fallback groups contribute to pooled metrics but never count as geographic evidence for model support. Fold-local scikit-learn pipelines fit preprocessing only on each training fold. Every observation gets exactly one out-of-fold prediction. Crop-region decisions are reported separately; a residual model is marked supported only when a crop has at least three independent canonical regions and its held-out regional MAE is below DSSAT's. The candidates are:
 
 - **DSSAT alone:** use `dssat_yield_kg_ha` directly.
 - **ML-only:** histogram gradient boosting predicts observed yield from eligible crop/environment/management features, excluding DSSAT yield and any outcome, residual, run, or group identifier.
-- **Hybrid:** histogram gradient boosting learns `observed − DSSAT` from paired records; its predicted residual is applied only when the exact crop-region is approved by held-out evaluation.
+- **Histogram Gradient Boosting residual:** learns `observed − DSSAT` from paired records.
+- **Extra Trees residual:** learns the same residual target with randomized tree ensembles.
+- **Ridge residual:** learns the same residual target with regularized linear regression.
+
+Every simulation result shows each model's estimate separately. An estimate is labeled exploratory unless grouped evaluation supports that model for the run's crop and region. Management suggestions are dataset-bounded what-if screens; they hold the DSSAT baseline fixed and are not causal recommendations. Rerun DSSAT after changing an input to measure the mechanistic scenario response. The bootstrap file in `data/synthetic/` remains excluded from training and evaluation.
 
 Artifacts are written to `data/evaluation/`:
 
@@ -138,13 +142,24 @@ Artifacts are written to `data/evaluation/`:
 - `metrics.json` — grouped folds, canonical crop-region decisions, and pooled out-of-fold metrics calculated over all predictions directly.
 - `metadata.json` — dataset SHA-256, features, fold/grouping design, random seeds, dependency versions, and evaluation timestamp.
 
+### Synthetic data for a clearly labeled demo
+
+`data/synthetic/demo_residual_dataset.csv` contains 2,000 bootstrap-generated
+rows with the model's feature and target columns. It exists to demonstrate the
+dataset shape; it is not independent field evidence and is deliberately excluded
+from production training and accuracy evaluation. The production residual model
+is trained on the 640 measured/DSSAT pairs in
+`data/processed/dssat_hybrid_dataset.csv`. See
+[`data/synthetic/README.md`](data/synthetic/README.md) and its metadata manifest
+for the generation method, source hash, and limitations.
+
 Reported metrics include MAE, RMSE, signed bias (prediction minus observation), mathematically meaningful R², and percent within ±10% of positive measured yields. Nonpositive measured yields are counted and excluded from the percent-within-tolerance denominator. `evaluate` always recomputes. `show-evaluation` only reads the saved report.
 
-`train-residual` is deliberately separate: it first backs up prior model artifacts under `models/backups/`, then fits the final model on all validated rows. It does not create evaluation metrics. Use out-of-fold evaluation—not the all-data fitted artifact—to compare methods.
+`train-residual` is deliberately separate: it first backs up prior model artifacts under `models/backups/`, then fits all three deployable residual models on all validated rows. It does not create evaluation metrics. Use out-of-fold evaluation—not the all-data fitted artifacts—to compare methods.
 
-### Import DES aggregate outcomes for context
+### Import DES aggregate outcomes for separate context data
 
-The `/outcomes` page displays imported DES Area, Production & Yield values as district/state context. Download a DES report and import it with `python -m cli.main import-des-apy --source <file> --yield-unit kg/ha` (or pass explicit area/production units when yield must be derived). The aggregate records are kept separate and are never residual-training targets. See [DES APY import instructions](data/external/des_apy/README.md).
+DES Area, Production & Yield reports can be imported for offline regional context with `python -m cli.main import-des-apy --source <file> --yield-unit kg/ha` (or explicit area/production units when yield must be derived). The importer stores them separately; the web interface does not present a dedicated outcomes page, and these aggregate records are never residual-training targets. See [DES APY import instructions](data/external/des_apy/README.md).
 
 ## Two-minute professor demonstration
 

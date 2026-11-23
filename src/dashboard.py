@@ -5,10 +5,13 @@ import json
 
 import pandas as pd
 
-COLORS = {"DSSAT": "#356859", "ML-only": "#d59b32", "Hybrid": "#7257a8"}
+COLORS = {"DSSAT": "#356859", "ML-only": "#d59b32", "Hybrid": "#7257a8",
+          "HGB residual": "#7257a8", "Extra Trees": "#2c82a0", "Ridge": "#b45c50"}
 METRICS_LABELS = {"dssat_only": "DSSAT", "ml_only": "ML-only", "hybrid": "Hybrid"}
 PREDICTION_COLUMNS = {"DSSAT": "dssat_prediction_kg_ha", "ML-only": "ml_only_prediction_kg_ha",
-                      "Hybrid": "hybrid_prediction_kg_ha"}
+                      "HGB residual": "hybrid_prediction_kg_ha",
+                      "Extra Trees": "extra_trees_prediction_kg_ha",
+                      "Ridge": "ridge_prediction_kg_ha"}
 
 
 def _header(title: str, width: int = 760, height: int = 330) -> list[str]:
@@ -27,12 +30,13 @@ def _legend(items: list[str], y: int = 302) -> list[str]:
 
 
 def mae_chart(metrics: dict) -> str:
-    labels = [("DSSAT", "dssat_only"), ("ML-only", "ml_only"), ("Hybrid", "hybrid")]
+    labels = [("DSSAT", "dssat_only"), ("ML-only", "ml_only"), ("HGB residual", "hybrid"),
+              ("Extra Trees", "extra_trees"), ("Ridge", "ridge")]
     values = [float(metrics["pooled_oof"][key]["mae_kg_ha"]) for _, key in labels]
     maximum = max(values) or 1.0
     svg = _header("Pooled out-of-fold mean absolute error (kg/ha)")
     for index, ((label, _), value) in enumerate(zip(labels, values)):
-        y = 78 + index * 62
+        y = 66 + index * 46
         width = 500 * value / maximum
         svg.append(f'<text x="30" y="{y+20}" font-family="Arial,sans-serif" font-size="13" fill="#22352a">{label}</text>')
         svg.append(f'<rect x="108" y="{y}" width="{width:.2f}" height="32" rx="6" fill="{COLORS[label]}"/>')

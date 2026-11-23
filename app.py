@@ -5,6 +5,7 @@ import hashlib
 import json
 import csv
 import math
+from functools import lru_cache
 from dataclasses import replace
 from types import SimpleNamespace
 from datetime import date, datetime
@@ -19,8 +20,8 @@ from src.dssat.data.repository import discover_experiments, validate_simulation
 from src.dssat.data.observations import OBSERVED_YIELD_TARGETS, simulation_yield_target
 from src.dssat.exceptions import DssatError
 from src.dssat.runner import _weather_stations_from_experiment, run_experiment
-from src.prediction import (HybridNotSupported, build_experiment_features,
-                            load_latest_benchmark, predict_residual)
+from src.prediction import (build_experiment_features, load_latest_benchmark,
+                            management_scenarios, predict_residual_models)
 from src.records import append_prediction_record
 from src.location import get_place, list_places, location_provenance
 from src.validation_regions import india_state_region
@@ -29,7 +30,6 @@ from src.dssat.data.power_weather import fetch_power_icasa
 from src.dssat.data.soil import find_nearest_soil_profile
 from src.features.soil_features import aggregate_soil_profile
 from src.dssat.parser import parse_summary
-from src.external_outcomes import load_des_apy_context
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -141,6 +141,7 @@ def _evaluation_config():
     return SimpleNamespace(project_data_dir=project_data_dir, model_dir=model_dir)
 
 
+@lru_cache(maxsize=2)
 def _successful_experiments(config, crop=None):
     """Limit the UI to treatments verified by the latest DSSAT support audit."""
     experiments = discover_experiments(config.data_dir, crop=crop,
@@ -206,6 +207,12 @@ def index():
     return render_template("index.html", experiments=experiments, crops=crops, error=error,
                            places=places, location_error=location_error,
                            seasons=seasons, months=months, days=days, soil_types=soil_types)
+
+
+def warm_index_cache():
+    """Load the installed crop catalog before opening the page to avoid a slow first request."""
+    config = DssatConfig.discover()
+    _successful_experiments(config)
 
 
 @app.get("/api/places")
@@ -438,6 +445,8 @@ def predict():
         treatment_details = experiment.treatment_details[treatment]
 
         hybrid, model_error, model_note = None, None, None
+        ml_model_outputs = []
+        management_recommendations = []
         model_path = config.model_dir / "residual_model.joblib"
         model_metadata_path = config.model_dir / "model_metadata.json"
         has_model_files = model_path.is_file() and model_metadata_path.is_file()
@@ -453,12 +462,27 @@ def predict():
             try:
                 features = build_experiment_features(config, experiment, row, treatment,
                                                     soil_file=soil_used_file, soil_id=soil_used_id)
-                hybrid = predict_residual(config, features, dssat_yield,
-                                          validation_region=india_state_region(place["state_name"]))
-                if hybrid is None:
+                model_outputs = predict_residual_models(
+                    config, features, dssat_yield,
+                    validation_region=india_state_region(place["state_name"]))
+                if not model_outputs:
                     model_error = "Model artifacts became unavailable during this request."
-            except HybridNotSupported as exc:
-                model_note = str(exc)
+                else:
+                    labels = {"hist_gradient_boosting": "Histogram Gradient Boosting",
+                              "extra_trees": "Extra Trees", "ridge": "Ridge Regression"}
+                    for model_key, model_output in model_outputs.items():
+                        ml_model_outputs.append({"key": model_key, **model_output})
+                    management_recommendations = management_scenarios(
+                        config, features, dssat_yield, applied_inputs=input_application)
+                    hgb = model_outputs.get("hist_gradient_boosting")
+                    if hgb and hgb["supported_for_crop_region"]:
+                        hybrid = {"predicted_residual_kg_ha": hgb["predicted_residual_kg_ha"],
+                                  "hybrid_yield_kg_ha": hgb["estimated_yield_kg_ha"],
+                                  "model_version": saved_model_metadata.get("model_version", "unknown"),
+                                  "evaluation_mae_kg_ha": hgb["evaluation_mae_kg_ha"]}
+                    if hybrid is None:
+                        model_note = ("ML estimates are shown below for comparison. Held-out evaluation does not "
+                                      "support presenting an adjusted yield as validated for this crop and region.")
             except Exception as exc:
                 logging.exception("Residual model prediction failed for run_id=%s", result["run_id"])
                 model_error = "Hybrid calculation failed; the DSSAT result below is not a hybrid prediction. Check the application log for details."
@@ -526,6 +550,8 @@ def predict():
             "yield_formula": "ML-adjusted yield = DSSAT yield + model-predicted residual",
             "model_version": hybrid["model_version"] if hybrid else None,
             "model_evaluation_mae_kg_ha": hybrid["evaluation_mae_kg_ha"] if hybrid else None,
+            "ml_model_outputs_json": json.dumps(ml_model_outputs, ensure_ascii=False),
+            "management_suggestions_json": json.dumps(management_recommendations, ensure_ascii=False),
             "dssat_version": config.version(),
             "dssat_executable_sha256": result.get("metadata", {}).get("dssat_executable_sha256"),
             "weather_source": weather_metadata.get("source", "DSSAT installed weather file"),
@@ -541,6 +567,8 @@ def predict():
                                yield_kg_ha=dssat_yield, field_inputs=field_inputs,
                                yield_target=yield_target,
                                hybrid=hybrid, model_error=model_error, model_note=model_note,
+                               ml_model_outputs=ml_model_outputs,
+                               management_recommendations=management_recommendations,
                                model_available=model_available,
                                provenance=provenance, growth_rows=len(result["growth"]) if result["growth"] is not None else 0,
                                comparison=comparison, benchmark=benchmark, observed_yield=observed_yield,
@@ -572,8 +600,7 @@ def evaluation():
 
 @app.get("/research")
 def research():
-    _, project_data_dir, _ = project_directories()
-    outcomes, _ = load_des_apy_context(project_data_dir)
+    _, project_data_dir, model_dir = project_directories()
     paired_summary = {"records": 0, "crops": 0}
     paired_path = project_data_dir / "processed" / "dssat_hybrid_dataset.csv"
     if paired_path.is_file():
@@ -586,32 +613,21 @@ def research():
             paired_summary["crops"] = len(paired_summary.pop("crop_names", set()))
         except (OSError, UnicodeError, csv.Error):
             paired_summary = {"records": 0, "crops": 0}
-    outcome_summary = {
-        "rows": int(len(outcomes)),
-        "crops": int(outcomes["crop"].nunique()) if not outcomes.empty else 0,
-        "states": int(outcomes["state"].nunique()) if not outcomes.empty else 0,
-    }
-    return render_template("research.html", outcome_summary=outcome_summary,
-                           paired_summary=paired_summary,
-                           reviewed_yield_crops=len(OBSERVED_YIELD_TARGETS))
-
-
-@app.get("/outcomes")
-def outcomes():
-    _, project_data_dir, _ = project_directories()
-    frame, manifests = load_des_apy_context(project_data_dir)
-    if not frame.empty:
-        frame = frame.sort_values(["year", "state", "crop", "district"], ascending=[False, True, True, True])
-    records = frame.head(250).to_dict("records")
-    summary = {
-        "rows": int(len(frame)),
-        "district_rows": int(frame["aggregation_level"].eq("district").sum()) if not frame.empty else 0,
-        "state_rows": int(frame["aggregation_level"].eq("state").sum()) if not frame.empty else 0,
-        "crops": int(frame["crop"].nunique()) if not frame.empty else 0,
-        "states": int(frame["state"].nunique()) if not frame.empty else 0,
-    }
-    return render_template("outcomes.html", rows=records, summary=summary,
-                           manifests=manifests, total_rows=len(frame))
+    model_summary = {"models": [], "metrics": None}
+    model_metadata_path = model_dir / "model_metadata.json"
+    evaluation_metrics_path = project_data_dir / "evaluation" / "metrics.json"
+    try:
+        if model_metadata_path.is_file():
+            model_metadata = json.loads(model_metadata_path.read_text(encoding="utf-8"))
+            model_summary["models"] = [value.get("label", key)
+                                       for key, value in model_metadata.get("models", {}).items()]
+        if evaluation_metrics_path.is_file():
+            model_summary["metrics"] = json.loads(evaluation_metrics_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        model_summary = {"models": [], "metrics": None}
+    return render_template("research.html", paired_summary=paired_summary,
+                           reviewed_yield_crops=len(OBSERVED_YIELD_TARGETS),
+                           model_summary=model_summary)
 
 
 if __name__ == "__main__":

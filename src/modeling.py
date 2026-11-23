@@ -1,9 +1,11 @@
 """Shared feature definitions and model factory for evaluation and deployment."""
 
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Ridge
 import numpy as np
 from pathlib import PurePath
 import pandas as pd
@@ -18,9 +20,9 @@ NUMERIC_FEATURES = [
 ELIGIBLE_FEATURES = CATEGORICAL_FEATURES + NUMERIC_FEATURES
 RESIDUAL_FEATURES = ELIGIBLE_FEATURES
 ML_ONLY_FEATURES = CATEGORICAL_FEATURES + [name for name in NUMERIC_FEATURES if name != "dssat_yield_kg_ha"]
-# Keep unobserved management, weather, and soil values missing instead of
-# inventing values. HistGradientBoostingRegressor supports missing numeric
-# feature values natively; DSSAT and measured outcomes must remain present.
+# Keep unobserved management, weather, and soil values missing in the dataset.
+# Each fitted pipeline imputes within its training fold only; DSSAT and measured
+# outcomes must remain present.
 MISSING_ALLOWED_NUMERIC_FEATURES = set(NUMERIC_FEATURES) - {"dssat_yield_kg_ha"}
 RANDOM_SEED = 42
 PAIRING_PROVENANCE_COLUMNS = {
@@ -35,17 +37,37 @@ PAIRING_PROVENANCE_COLUMNS = {
 }
 
 
-def make_regressor(features: list[str], *, seed: int = RANDOM_SEED) -> Pipeline:
+MODEL_SPECS = {
+    "hist_gradient_boosting": {"label": "Histogram Gradient Boosting", "estimator": "HistGradientBoostingRegressor"},
+    "extra_trees": {"label": "Extra Trees", "estimator": "ExtraTreesRegressor"},
+    "ridge": {"label": "Ridge Regression", "estimator": "Ridge"},
+}
+
+
+def make_regressor(features: list[str], *, seed: int = RANDOM_SEED,
+                   model_name: str = "hist_gradient_boosting") -> Pipeline:
     categorical = [name for name in CATEGORICAL_FEATURES if name in features]
     numeric = [name for name in features if name not in categorical]
+    numeric_steps = [("imputer", SimpleImputer(strategy="median"))]
+    if model_name == "ridge":
+        numeric_steps.append(("scale", StandardScaler()))
     preprocess = ColumnTransformer([
-        ("categorical", OneHotEncoder(handle_unknown="ignore"), categorical),
-        ("numeric", "passthrough", numeric),
+        ("categorical", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")),
+                                   ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical),
+        ("numeric", Pipeline(numeric_steps), numeric),
     ], sparse_threshold=0)
+    estimators = {
+        "hist_gradient_boosting": HistGradientBoostingRegressor(max_iter=150, l2_regularization=1.0,
+                                                                  random_state=seed),
+        "extra_trees": ExtraTreesRegressor(n_estimators=250, min_samples_leaf=2,
+                                            max_features=0.9, random_state=seed, n_jobs=1),
+        "ridge": Ridge(alpha=10.0),
+    }
+    if model_name not in estimators:
+        raise ValueError(f"Unknown model: {model_name}")
     return Pipeline([
         ("preprocess", preprocess),
-        ("regressor", HistGradientBoostingRegressor(max_iter=150, l2_regularization=1.0,
-                                                     random_state=seed)),
+        ("regressor", estimators[model_name]),
     ])
 
 

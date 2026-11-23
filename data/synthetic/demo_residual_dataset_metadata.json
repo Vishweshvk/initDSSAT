@@ -1,0 +1,64 @@
+{
+  "dataset_status": "synthetic_bootstrap_demo_only",
+  "created_at_utc": "2026-11-22T18:01:22.401404+00:00",
+  "row_count": 2000,
+  "seed": 42,
+  "source_file": "data/processed/dssat_hybrid_dataset.csv",
+  "source_sha256": "d22daaba18c7beb4ab13283053cbf4e89975fd115939e49f86cafd05716f731a",
+  "source_row_count": 640,
+  "source_experiment_count": 93,
+  "source_crop_count": 17,
+  "feature_columns": [
+    "crop",
+    "cultivar",
+    "weather_station",
+    "soil_id",
+    "dssat_yield_kg_ha",
+    "total_rainfall_mm",
+    "mean_tmax_c",
+    "mean_tmin_c",
+    "mean_solar_radiation_mj_m2_day",
+    "rain_days",
+    "crop_cycle_days",
+    "soil_depth_cm",
+    "soil_mean_slll_cm3_cm3",
+    "soil_mean_sdul_cm3_cm3",
+    "soil_mean_ssat_cm3_cm3",
+    "soil_mean_sbdm_g_cm3",
+    "soil_mean_sloc_pct",
+    "nitrogen_rate_kg_ha",
+    "irrigated"
+  ],
+  "target_columns": [
+    "residual_kg_ha",
+    "observed_yield_kg_ha"
+  ],
+  "generation_method": "Stratified bootstrap of authentic DSSAT feature vectors, followed by within-crop bootstrap sampling of observed-minus-DSSAT residuals. Rows are intentionally pseudo-data.",
+  "external_open_data_references": [
+    {
+      "name": "DSSAT-CSM experimental data repository",
+      "url": "https://github.com/DSSAT/dssat-csm-data"
+    },
+    {
+      "name": "NASA POWER daily API documentation",
+      "url": "https://power.larc.nasa.gov/docs/services/api/temporal/daily/"
+    },
+    {
+      "name": "SoilGrids documentation",
+      "url": "https://docs.isric.org/globaldata/soilgrids/"
+    },
+    {
+      "name": "CIMMYT eastern India wheat field dataset (not Maharashtra ground truth)",
+      "url": "https://doi.org/10.71682/10549424"
+    }
+  ],
+  "limitations": [
+    "Synthetic rows are resamples of the source dataset and do not increase independent sample size.",
+    "Residuals are bootstrapped from existing paired observations; they are not new measured outcomes.",
+    "No synthetic row has a verified DSSAT run for its complete row-specific inputs.",
+    "This file intentionally lacks production pairing provenance and must not be used for production training or accuracy claims.",
+    "It may be used for UI demonstrations, schema checks, and clearly labeled pipeline exercises only."
+  ],
+  "production_training_dataset": "data/processed/dssat_hybrid_dataset.csv",
+  "production_model_uses_synthetic_rows": false
+}

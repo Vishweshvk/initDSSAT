@@ -11,7 +11,7 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold
 
-from .modeling import (ELIGIBLE_FEATURES, ML_ONLY_FEATURES, RANDOM_SEED,
+from .modeling import (ELIGIBLE_FEATURES, ML_ONLY_FEATURES, MODEL_SPECS, RANDOM_SEED,
                        RESIDUAL_FEATURES, make_regressor, validate_training_frame)
 from .validation_regions import dssat_location_region, dssat_validation_group
 
@@ -19,6 +19,8 @@ METHOD_COLUMNS = {
     "dssat_only": "dssat_prediction_kg_ha",
     "ml_only": "ml_only_prediction_kg_ha",
     "hybrid": "hybrid_prediction_kg_ha",
+    "extra_trees": "extra_trees_prediction_kg_ha",
+    "ridge": "ridge_prediction_kg_ha",
 }
 
 
@@ -92,13 +94,15 @@ def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
         ml_model.fit(train[ML_ONLY_FEATURES], train["observed_yield_kg_ha"])
         ml_prediction = ml_model.predict(test[ML_ONLY_FEATURES])
 
-        residual_model = make_regressor(RESIDUAL_FEATURES, seed=RANDOM_SEED)
-        residual_model.fit(train[RESIDUAL_FEATURES], train["residual_kg_ha"])
-        predicted_residual = residual_model.predict(test[RESIDUAL_FEATURES])
+        residual_predictions = {}
+        for model_name in MODEL_SPECS:
+            residual_model = make_regressor(RESIDUAL_FEATURES, seed=RANDOM_SEED,
+                                            model_name=model_name)
+            residual_model.fit(train[RESIDUAL_FEATURES], train["residual_kg_ha"])
+            residual_predictions[model_name] = residual_model.predict(test[RESIDUAL_FEATURES])
         dssat_prediction = test["dssat_yield_kg_ha"].to_numpy(dtype=float)
-        hybrid_prediction = dssat_prediction + predicted_residual
         for index, (_, item) in enumerate(test.iterrows()):
-            rows.append({
+            prediction_row = {
                 "experiment_id": str(item["experiment_id"]),
                 "treatment_id": int(item["treatment_id"]),
                 "crop": str(item["crop"]),
@@ -113,9 +117,14 @@ def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
                 "observed_yield_kg_ha": float(item["observed_yield_kg_ha"]),
                 "dssat_prediction_kg_ha": float(dssat_prediction[index]),
                 "ml_only_prediction_kg_ha": float(ml_prediction[index]),
-                "predicted_residual_kg_ha": float(predicted_residual[index]),
-                "hybrid_prediction_kg_ha": float(hybrid_prediction[index]),
-            })
+            }
+            for model_name, residual_values in residual_predictions.items():
+                column_key = {"hist_gradient_boosting": "hybrid_prediction_kg_ha",
+                              "extra_trees": "extra_trees_prediction_kg_ha",
+                              "ridge": "ridge_prediction_kg_ha"}[model_name]
+                prediction_row[column_key] = float(dssat_prediction[index] + residual_values[index])
+            prediction_row["predicted_residual_kg_ha"] = prediction_row["hybrid_prediction_kg_ha"] - float(dssat_prediction[index])
+            rows.append(prediction_row)
         fold_predictions = [r for r in rows if r["fold_number"] == fold_number]
         observed = [r["observed_yield_kg_ha"] for r in fold_predictions]
         fold_metrics = {name: regression_metrics(observed, [r[column] for r in fold_predictions])
@@ -146,23 +155,30 @@ def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
         region_metrics = {name: regression_metrics(subset["observed_yield_kg_ha"], subset[column])
                           for name, column in METHOD_COLUMNS.items()}
         independent_region_count = int(region_counts_by_crop.get(crop, 0))
-        better = (region_metrics["hybrid"]["mae_kg_ha"]
-                  < region_metrics["dssat_only"]["mae_kg_ha"])
         enough_regions = independent_region_count >= 3
-        approved = enough_regions and better
-        decision = ("hybrid_supported" if approved else
+        model_support = {name: bool(enough_regions and region_metrics[name]["mae_kg_ha"]
+                                    < region_metrics["dssat_only"]["mae_kg_ha"])
+                         for name in ("hybrid", "extra_trees", "ridge")}
+        approved = model_support["hybrid"]
+        decision = ("one_or_more_models_supported" if any(model_support.values()) else
                     "insufficient_independent_regions" if not enough_regions else
                     "dssat_only_lower_or_equal_mae")
         item = {
             "crop": str(crop), "region": str(region), "n": int(len(subset)),
             "n_independent_regions_for_crop": independent_region_count,
             "held_out_experiments": sorted(subset["experiment_id"].astype(str).unique().tolist()),
-            "metrics": region_metrics, "hybrid_supported": bool(approved), "decision": decision,
+            "metrics": region_metrics, "hybrid_supported": bool(approved),
+            "model_support": model_support, "decision": decision,
         }
         crop_region.append(item)
         if approved:
             supported_regions.append({"crop": str(crop), "region": str(region)})
     hybrid_beats_dssat = pooled["hybrid"]["mae_kg_ha"] < pooled["dssat_only"]["mae_kg_ha"]
+    supported_by_model = {
+        model_key: [{"crop": item["crop"], "region": item["region"]}
+                    for item in crop_region if item["model_support"].get(model_key, False)]
+        for model_key in ("hybrid", "extra_trees", "ridge")
+    }
     metrics = {
         "benchmark_type": "retrospective_historical_full_season_weather",
         "validation_method": "5_fold_grouped_oof",
@@ -176,9 +192,16 @@ def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
         "folds": folds, "per_experiment": per_experiment,
         "crop_region_validation": crop_region,
         "hybrid_supported_regions": supported_regions,
+        "supported_regions_by_model": supported_by_model,
         "minimum_independent_regions_per_crop": 3,
         "pooled_oof": pooled,
         "pooled_hybrid_beats_dssat_on_mae": bool(hybrid_beats_dssat),
+        "model_comparison": {key: {"label": MODEL_SPECS[model_key]["label"],
+                                    "estimator": MODEL_SPECS[model_key]["estimator"],
+                                    "target": "measured yield minus DSSAT yield"}
+                             for key, model_key in (("hybrid", "hist_gradient_boosting"),
+                                                    ("extra_trees", "extra_trees"),
+                                                    ("ridge", "ridge"))},
         "interpretation": "Five-fold out-of-fold evaluation keeps each canonical country/admin-1 region together when available. Rows without one are grouped by exact DSSAT site label, or by experiment when the site label is missing. Fallback groups are included in pooled metrics but never count as geographic evidence for hybrid approval. A crop-region is supported only when that crop has at least three canonical regions and lower held-out-region hybrid MAE. Historical full-season weather makes this retrospective, not sowing-time forecast validation.",
     }
     try:
@@ -193,10 +216,14 @@ def evaluate_dataset(dataset_path: Path, output_dir: Path) -> dict:
         "validation_regions": sorted(frame.loc[frame["validation_region"] != "UNKNOWN|UNKNOWN", "validation_region"].unique().tolist()),
         "validation_groups": groups,
         "grouping_strategy": "Five-fold GroupKFold: canonical country/admin-1 groups where available; otherwise exact DSSAT location labels; rows with no usable location are grouped by experiment. Fallback groups are not geographic validation evidence. Preprocessing is fitted separately inside every fold.",
-        "random_seeds": {"ml_only_gradient_boosting": RANDOM_SEED, "residual_gradient_boosting": RANDOM_SEED},
+        "random_seeds": {"grouped_oof": RANDOM_SEED},
         "models": {"ml_only": {"estimator": "HistGradientBoostingRegressor", "max_iter": 150,
                                  "features": ML_ONLY_FEATURES},
-                   "residual": {"estimator": "HistGradientBoostingRegressor", "max_iter": 150,
+                   **{name: {"estimator": spec["estimator"], "label": spec["label"],
+                             "features": RESIDUAL_FEATURES,
+                             "target": "observed_yield_kg_ha - dssat_yield_kg_ha"}
+                      for name, spec in MODEL_SPECS.items()},
+                   "residual": {"estimator": MODEL_SPECS["hist_gradient_boosting"]["estimator"],
                                 "features": RESIDUAL_FEATURES}},
         "excluded_ml_only_features": ["dssat_yield_kg_ha", "observed_yield_kg_ha", "residual_kg_ha",
                                       "experiment_id", "treatment_id", "run_id", "held_out_experiment"],

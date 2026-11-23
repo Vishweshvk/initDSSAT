@@ -23,5 +23,12 @@ data/external/des_apy/processed/
 data/location/india/district_boundaries/raw/district_nwic_geojson.zip
 data/location/india/district_boundaries/raw/extracted/district_nwic.GeoJSON
 models/residual_model.joblib
+models/extra_trees_residual_model.joblib
+models/ridge_residual_model.joblib
 models/model_metadata.json
 models/model_metrics.json
+
+# Local DSSAT staging and web server logs
+/d0/
+/d3/
+/server-8000*.log
